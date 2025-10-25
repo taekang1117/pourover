@@ -1,2 +1,4 @@
-Overview
-Create a pour-over machine that 
+# Overview
+We are making a pour over machine with raspberry pi. 
+
+# Flowchart
