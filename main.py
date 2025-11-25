@@ -1,29 +1,71 @@
-# color_test_webcam.py
+# main.py
 
 import cv2
 import numpy as np
 
-def get_color_name(hsv_value):
-    """Simple mapping from Hue value to rough color category.
-    You can expand this mapping for your bean-categories."""
-    hue = hsv_value[0]
-    if hue < 10 or hue > 170:
-        return "RED/BROWN-TONE"
-    elif hue < 25:
+def get_general_color_name(hsv_value):
+    """General mapping from HSV hue + saturation/value to color names."""
+    h, s, v = hsv_value
+    if v < 40 and s < 50:
+        return "BLACK / VERY DARK"
+    if v > 230 and s < 30:
+        return "WHITE / VERY LIGHT"
+    if s < 50 and v < 200:
+        return "GRAY / NEUTRAL"
+    if h < 5 or h >= 170:
+        return "RED"
+    elif h < 15:
+        return "RED-ORANGE"
+    elif h < 25:
         return "ORANGE"
-    elif hue < 40:
+    elif h < 35:
+        return "YELLOW-ORANGE"
+    elif h < 45:
         return "YELLOW"
-    elif hue < 80:
+    elif h < 55:
+        return "YELLOW-GREEN"
+    elif h < 70:
         return "GREEN"
-    elif hue < 130:
+    elif h < 85:
+        return "CYAN-GREEN"
+    elif h < 100:
+        return "CYAN"
+    elif h < 115:
+        return "BLUE-CYAN"
+    elif h < 130:
         return "BLUE"
-    elif hue < 160:
+    elif h < 145:
+        return "BLUE-PURPLE"
+    elif h < 160:
         return "PURPLE"
+    elif h < 170:
+        return "MAGENTA"
     else:
-        return "UNKNOWN"
+        return "BROWN / RED-BROWN TONE"
+
+def get_bean_category(hsv_mean, other_features=None):
+    """Return bean category based on HSV mean (and optionally other features)."""
+    h, s, v = hsv_mean
+
+    # Specific bean-sorting categories thresholds (example values, tune later)
+    if v > 200 and s < 50:
+        return "LIGHT-COLORED"
+    if v < 50 and s < 60:
+        return "DEFECTIVE / VERY DARK"
+    # Quaker: very pale beans
+    if v > 180 and s < 80 and h < 40:
+        return "QUAKER"
+    # Semi-Quaker: intermediate pale
+    if v > 140 and s < 120 and h < 50:
+        return "SEMI-QUAKER"
+    # Good bean / normal roasted
+    if 60 < v < 180 and s > 60 and 15 < h < 60:
+        return "NON-QUAKER / GOOD BEAN"
+    # Other defects (crack, wormhole, etc)
+    return "OTHER DEFECT"
 
 def main():
-    cap = cv2.VideoCapture(0)  # 0 = default webcam, change if needed
+    cap = cv2.VideoCapture(0)  # default webcam index
     if not cap.isOpened():
         print("Cannot open camera")
         return
@@ -35,26 +77,38 @@ def main():
             print("Failed to grab frame")
             break
 
-        # Optionally resize for speed
         frame = cv2.resize(frame, (640, 480))
-
-        # Convert from BGR to HSV color space
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        # Choose pixel in the center of frame (you can refine to ROI of object)
-        height, width = hsv.shape[:2]
-        cx, cy = width // 2, height // 2
-        hsv_center = hsv[cy, cx]
+        h, w = hsv.shape[:2]
+        roi_size = 50
+        cx, cy = w // 2, h // 2
+        roi = hsv[cy-roi_size//2 : cy+roi_size//2,
+                  cx-roi_size//2 : cx+roi_size//2]
 
-        # Determine approximate color name
-        color_name = get_color_name(hsv_center)
+        mean_h = int(np.mean(roi[:, :, 0]))
+        mean_s = int(np.mean(roi[:, :, 1]))
+        mean_v = int(np.mean(roi[:, :, 2]))
+        hsv_mean = (mean_h, mean_s, mean_v)
 
-        # Display result on frame
-        cv2.circle(frame, (cx, cy), 10, (0, 0, 0), 2)
-        cv2.putText(frame, f"Color: {color_name}", (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255,255,255), 2)
+        general_color = get_general_color_name(hsv_mean)
+        bean_category = get_bean_category(hsv_mean)
 
-        cv2.imshow("Webcam Color Test", frame)
+        cv2.rectangle(frame,
+                      (cx-roi_size//2, cy-roi_size//2),
+                      (cx+roi_size//2, cy+roi_size//2),
+                      (0,255,0), 2)
+        cv2.putText(frame, f"General Color: {general_color}",
+                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                    (255,255,255), 2)
+        cv2.putText(frame, f"Bean Category: {bean_category}",
+                    (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                    (255,255,255), 2)
+        cv2.putText(frame, f"H:{mean_h} S:{mean_s} V:{mean_v}",
+                    (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                    (255,255,255), 1)
+
+        cv2.imshow("Webcam Bean-Color Test", frame)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
