@@ -1,9 +1,9 @@
+import time
 import cv2
 import numpy as np
 from picamera2 import Picamera2
 
 def get_general_color_name(hsv_value):
-    """General mapping from HSV hue + saturation/value to color names."""
     h, s, v = hsv_value
     if v < 40 and s < 50:
         return "BLACK / VERY DARK"
@@ -43,100 +43,64 @@ def get_general_color_name(hsv_value):
         return "BROWN / RED-BROWN TONE"
 
 def get_bean_category(hsv_mean, other_features=None):
-    """Return bean category based on HSV mean (and optionally other features)."""
     h, s, v = hsv_mean
 
-    # Specific bean-sorting categories thresholds (example values, tune later)
     if v > 200 and s < 50:
         return "LIGHT-COLORED"
     if v < 50 and s < 60:
         return "DEFECTIVE / VERY DARK"
-    # Quaker: very pale beans
     if v > 180 and s < 80 and h < 40:
         return "QUAKER"
-    # Semi-Quaker: intermediate pale
     if v > 140 and s < 120 and h < 50:
         return "SEMI-QUAKER"
-    # Good bean / normal roasted
     if 60 < v < 180 and s > 60 and 15 < h < 60:
         return "NON-QUAKER / GOOD BEAN"
-    # Other defects (crack, wormhole, etc)
     return "OTHER DEFECT"
 
 def main():
-    # Use PiCamera2 instead of VideoCapture(0)
     picam2 = Picamera2()
-
-    # 640x480 is enough for your ROI + text overlay
-    config = picam2.create_preview_configuration(
+    config = picam2.create_video_configuration(
         main={"format": "BGR888", "size": (640, 480)}
     )
     picam2.configure(config)
     picam2.start()
 
-    print("Press 'q' to quit.")
-    while True:
-        # Grab a frame as a NumPy array in BGR format (OpenCV-friendly)
-        frame = picam2.capture_array()
+    print("Headless mode. Press Ctrl+C to stop.")
+    try:
+        while True:
+            frame = picam2.capture_array()
 
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-        h, w = hsv.shape[:2]
-        roi_size = 50
-        cx, cy = w // 2, h // 2
-        roi = hsv[cy - roi_size // 2 : cy + roi_size // 2,
-                  cx - roi_size // 2 : cx + roi_size // 2]
+            h, w = hsv.shape[:2]
+            roi_size = 50
+            cx, cy = w // 2, h // 2
+            roi = hsv[cy - roi_size // 2 : cy + roi_size // 2,
+                      cx - roi_size // 2 : cx + roi_size // 2]
 
-        mean_h = int(np.mean(roi[:, :, 0]))
-        mean_s = int(np.mean(roi[:, :, 1]))
-        mean_v = int(np.mean(roi[:, :, 2]))
-        hsv_mean = (mean_h, mean_s, mean_v)
+            mean_h = int(np.mean(roi[:, :, 0]))
+            mean_s = int(np.mean(roi[:, :, 1]))
+            mean_v = int(np.mean(roi[:, :, 2]))
+            hsv_mean = (mean_h, mean_s, mean_v)
 
-        general_color = get_general_color_name(hsv_mean)
-        bean_category = get_bean_category(hsv_mean)
+            general_color = get_general_color_name(hsv_mean)
+            bean_category = get_bean_category(hsv_mean)
 
-        cv2.rectangle(
-            frame,
-            (cx - roi_size // 2, cy - roi_size // 2),
-            (cx + roi_size // 2, cy + roi_size // 2),
-            (0, 255, 0),
-            2,
-        )
-        cv2.putText(
-            frame,
-            f"General Color: {general_color}",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (255, 255, 255),
-            2,
-        )
-        cv2.putText(
-            frame,
-            f"Bean Category: {bean_category}",
-            (20, 80),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (255, 255, 255),
-            2,
-        )
-        cv2.putText(
-            frame,
-            f"H:{mean_h} S:{mean_s} V:{mean_v}",
-            (20, 120),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            1,
-        )
+            # Print one line that updates in place
+            print(
+                f"H:{mean_h:3d} S:{mean_s:3d} V:{mean_v:3d} | "
+                f"{general_color:25s} | {bean_category:25s}",
+                end="\r",
+                flush=True,
+            )
 
-        cv2.imshow("PiCamera2 Bean-Color Test", frame)
+            time.sleep(0.2)  # slow down prints a bit
 
-        if cv2.waitKey(1) & 0xFF == ord("q"):
-            break
+    except KeyboardInterrupt:
+        print("\nStopping...")
 
-    picam2.stop()
-    cv2.destroyAllWindows()
+    finally:
+        picam2.stop()
 
 if __name__ == "__main__":
     main()
