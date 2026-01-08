@@ -1,5 +1,4 @@
-# main.py
-
+# main.py (PiCamera2) - Shape-based Bean vs Rock
 import cv2
 import numpy as np
 from picamera2 import Picamera2
@@ -10,7 +9,7 @@ from picamera2 import Picamera2
 FRAME_W, FRAME_H = 960, 540
 
 MIN_AREA = 300
-MAX_AREA = 200000
+MAX_AREA = 250000
 
 DIFF_THRESH = 25
 BLUR_K = 5
@@ -19,16 +18,24 @@ MORPH_K = 5
 OPEN_ITERS = 1
 CLOSE_ITERS = 2
 
-# Classification heuristics
-ROCK_S_MAX = 45
-ROCK_TEX_MIN = 120.0
-
-BEAN_H_MIN = 5
-BEAN_H_MAX = 40
-BEAN_S_MIN = 40
-BEAN_TEX_MAX = 350.0
-
 SHOW_DEBUG = True
+
+# ---- Shape thresholds (tune with your real beans/rocks) ----
+# Coffee bean tends to be oval:
+BEAN_AR_MIN = 1.25        # aspect ratio lower bound (max(w,h)/min(w,h))
+BEAN_AR_MAX = 2.10        # upper bound
+BEAN_SOL_MIN = 0.88       # beans usually quite solid (smooth-ish boundary)
+BEAN_CIRC_MIN = 0.45      # circularity range
+BEAN_CIRC_MAX = 0.85
+
+# Rock tends to be irregular:
+ROCK_SOL_MAX = 0.84       # below this -> likely rock
+ROCK_CIRC_MAX = 0.55      # very jagged often lower circularity (not always)
+ROCK_AR_EXTREME = 2.30    # very elongated or extreme aspect -> likely not bean
+
+# Optional: if your rocks are much larger/smaller than beans, use area
+# BEAN_AREA_MIN = 600
+# BEAN_AREA_MAX = 20000
 
 
 # =========================
@@ -39,92 +46,6 @@ def morph_cleanup(mask: np.ndarray) -> np.ndarray:
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=OPEN_ITERS)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=CLOSE_ITERS)
     return mask
-
-def laplacian_texture(gray_roi: np.ndarray, mask_roi: np.ndarray) -> float:
-    if gray_roi.size == 0:
-        return 0.0
-    gray_masked = cv2.bitwise_and(gray_roi, gray_roi, mask=mask_roi)
-    ys, xs = np.where(mask_roi > 0)
-    if len(xs) == 0 or len(ys) == 0:
-        return 0.0
-    x0, x1 = xs.min(), xs.max()
-    y0, y1 = ys.min(), ys.max()
-    crop = gray_masked[y0:y1+1, x0:x1+1]
-    if crop.size == 0:
-        return 0.0
-    lap = cv2.Laplacian(crop, cv2.CV_64F)
-    return float(lap.var())
-
-def contour_stats(frame_bgr: np.ndarray, cnt) -> dict:
-    x, y, w, h = cv2.boundingRect(cnt)
-    roi = frame_bgr[y:y+h, x:x+w]
-
-    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-
-    mask = np.zeros((h, w), dtype=np.uint8)
-    cnt_local = cnt.copy()
-    cnt_local[:, 0, 0] -= x
-    cnt_local[:, 0, 1] -= y
-    cv2.drawContours(mask, [cnt_local], -1, 255, -1)
-
-    mean_h = cv2.mean(hsv[:, :, 0], mask=mask)[0]
-    mean_s = cv2.mean(hsv[:, :, 1], mask=mask)[0]
-    mean_v = cv2.mean(hsv[:, :, 2], mask=mask)[0]
-
-    area = float(cv2.contourArea(cnt))
-    perim = float(cv2.arcLength(cnt, True))
-    circularity = float((4.0 * np.pi * area) / (perim * perim + 1e-9))
-
-    hull = cv2.convexHull(cnt)
-    hull_area = float(cv2.contourArea(hull)) + 1e-9
-    solidity = float(area / hull_area)
-
-    tex = laplacian_texture(gray, mask)
-
-    return {
-        "bbox": (x, y, w, h),
-        "mean_h": float(mean_h),
-        "mean_s": float(mean_s),
-        "mean_v": float(mean_v),
-        "area": area,
-        "circularity": circularity,
-        "solidity": solidity,
-        "texture": float(tex),
-    }
-
-def classify(stats: dict) -> str:
-    h = stats["mean_h"]
-    s = stats["mean_s"]
-    v = stats["mean_v"]
-    t = stats["texture"]
-    sol = stats["solidity"]
-
-    if v < 20:
-        return "UNKNOWN"
-
-    rock_score = 0
-    bean_score = 0
-
-    if s <= ROCK_S_MAX:
-        rock_score += 2
-    if t >= ROCK_TEX_MIN:
-        rock_score += 2
-    if sol < 0.82:
-        rock_score += 1
-
-    if BEAN_H_MIN <= h <= BEAN_H_MAX and s >= BEAN_S_MIN:
-        bean_score += 3
-    if t <= BEAN_TEX_MAX:
-        bean_score += 1
-    if 0.82 <= sol <= 0.99:
-        bean_score += 1
-
-    if rock_score > bean_score:
-        return "ROCK"
-    if bean_score > rock_score:
-        return "COFFEE BEAN"
-    return "UNKNOWN"
 
 def get_object_mask(frame_bgr: np.ndarray, bg_bgr: np.ndarray):
     g1 = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
@@ -147,39 +68,112 @@ def find_contours(mask: np.ndarray):
             out.append(c)
     return out
 
+def contour_stats(frame_bgr: np.ndarray, cnt) -> dict:
+    x, y, w, h = cv2.boundingRect(cnt)
+
+    area = float(cv2.contourArea(cnt))
+    perim = float(cv2.arcLength(cnt, True))
+    circularity = float((4.0 * np.pi * area) / (perim * perim + 1e-9))
+
+    hull = cv2.convexHull(cnt)
+    hull_area = float(cv2.contourArea(hull)) + 1e-9
+    solidity = float(area / hull_area)
+
+    # Aspect ratio (>=1)
+    aspect = float(max(w, h) / (min(w, h) + 1e-9))
+
+    # Ellipse fit (needs at least 5 points)
+    ellipse = None
+    if len(cnt) >= 5:
+        try:
+            ellipse = cv2.fitEllipse(cnt)  # ((cx,cy),(MA,ma), angle)
+        except cv2.error:
+            ellipse = None
+
+    return {
+        "bbox": (x, y, w, h),
+        "area": area,
+        "perim": perim,
+        "circularity": circularity,
+        "solidity": solidity,
+        "aspect": aspect,
+        "ellipse": ellipse,
+    }
+
+def classify(stats: dict) -> str:
+    """
+    Shape-first classifier.
+    Works when beans/rocks have similar color under current lighting.
+    """
+    area = stats["area"]
+    circ = stats["circularity"]
+    sol = stats["solidity"]
+    ar = stats["aspect"]
+    ellipse = stats["ellipse"]
+
+    # Basic sanity
+    if area < MIN_AREA:
+        return "UNKNOWN"
+
+    # Strong rock cues (irregular)
+    if sol <= ROCK_SOL_MAX:
+        return "ROCK"
+    if ar >= ROCK_AR_EXTREME and sol < 0.90:
+        return "ROCK"
+
+    # Strong bean cues (oval + smooth)
+    # If ellipse exists, we can use its major/minor ratio too
+    if ellipse is not None:
+        (_, _), (MA, ma), _ = ellipse
+        # MA = major axis length, ma = minor axis length (sometimes swapped depending on OpenCV)
+        major = max(MA, ma)
+        minor = min(MA, ma) + 1e-9
+        ell_ar = float(major / minor)
+    else:
+        ell_ar = None
+
+    bean_like = (
+        (BEAN_AR_MIN <= ar <= BEAN_AR_MAX) and
+        (sol >= BEAN_SOL_MIN) and
+        (BEAN_CIRC_MIN <= circ <= BEAN_CIRC_MAX)
+    )
+
+    if ell_ar is not None:
+        # Ellipse ratio is usually a good bean indicator
+        # Typical beans: ~1.3-2.2; rocks can be all over but often worse fit
+        bean_like = bean_like and (1.2 <= ell_ar <= 2.5)
+
+    if bean_like:
+        return "COFFEE BEAN"
+
+    # If it doesn't clearly match bean but also not strongly rock, mark unknown
+    # You can later push unknown into rock/bean depending on your sorting policy.
+    return "UNKNOWN"
+
 
 # =========================
 # Main (PiCamera2)
 # =========================
 def main():
-    # --- Init PiCamera2 ---
     picam2 = Picamera2()
     config = picam2.create_preview_configuration(
         main={"format": "RGB888", "size": (FRAME_W, FRAME_H)}
     )
     picam2.configure(config)
-
-    # 可選：鎖曝光/白平衡（讓顏色更穩）
-    # picam2.set_controls({"AeEnable": True, "AwbEnable": True})
-    # 如果要完全鎖定，通常需要先讓它自動跑一下再鎖住，後面可再加。
-
     picam2.start()
 
     bg = None
     print("Controls: b=capture background(empty) | r=reset | q=quit")
 
     while True:
-        # Picamera2 gives RGB; OpenCV uses BGR for display/processing
         frame_rgb = picam2.capture_array()
         frame = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-
         vis = frame.copy()
 
         if bg is None:
             cv2.putText(vis, "Press 'b' to capture BACKGROUND (empty plate)",
                         (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-            cv2.imshow("PiCam - Bean vs Rock", vis)
-
+            cv2.imshow("PiCam - Bean vs Rock (Shape)", vis)
             key = cv2.waitKey(1) & 0xFF
             if key == ord('b'):
                 bg = frame.copy()
@@ -198,6 +192,8 @@ def main():
             label = classify(stats)
 
             x, y, w, h = stats["bbox"]
+
+            # Draw contour and bbox
             if label == "COFFEE BEAN":
                 color = (0, 255, 0); beans += 1
             elif label == "ROCK":
@@ -206,16 +202,24 @@ def main():
                 color = (255, 255, 0); unknown += 1
 
             cv2.rectangle(vis, (x, y), (x+w, y+h), color, 2)
-            txt = (f"{label} H:{stats['mean_h']:.0f} S:{stats['mean_s']:.0f} "
-                   f"V:{stats['mean_v']:.0f} T:{stats['texture']:.0f} Sol:{stats['solidity']:.2f}")
+
+            # Optional: draw fitted ellipse
+            if stats["ellipse"] is not None:
+                cv2.ellipse(vis, stats["ellipse"], color, 2)
+
+            txt = (f"{label} "
+                   f"AR:{stats['aspect']:.2f} "
+                   f"C:{stats['circularity']:.2f} "
+                   f"Sol:{stats['solidity']:.2f} "
+                   f"A:{stats['area']:.0f}")
             cv2.putText(vis, txt, (x, max(20, y-8)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
         header = f"Beans: {beans} | Rocks: {rocks} | Unknown: {unknown}"
         cv2.putText(vis, header, (20, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
 
-        cv2.imshow("PiCam - Bean vs Rock", vis)
+        cv2.imshow("PiCam - Bean vs Rock (Shape)", vis)
 
         if SHOW_DEBUG:
             cv2.imshow("Object Mask", obj_mask)
@@ -234,3 +238,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
