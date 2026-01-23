@@ -28,8 +28,8 @@ from picamera2 import Picamera2
 # =========================
 FRAME_W, FRAME_H = 960, 540
 
-MIN_AREA = 300
-MAX_AREA = 250000
+MIN_AREA = 1000
+MAX_AREA = 7000
 
 DIFF_THRESH = 25
 BLUR_K = 5
