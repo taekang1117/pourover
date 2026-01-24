@@ -1,5 +1,15 @@
-# main.py (PiCamera2) - Stable Bean vs Rock (NO UNKNOWN) + ROI + WS2812 White
+# main.py (PiCamera2) - Stable Bean vs Rock + ROI + Full-frame Ellipse + NO UNKNOWN
 # Run: sudo python3 main.py
+#
+# Notes:
+# - This version draws ellipses on the FULL window (not only ROI view).
+# - This version uses a "bean = less round / more oval" rule because your rocks look rounder/smoother.
+# - NO UNKNOWN: if not BEAN => ROCK.
+#
+# Controls:
+#   b = capture background (empty plate, inside ROI)
+#   r = reset background
+#   q = quit
 
 import time
 import cv2
@@ -11,7 +21,7 @@ from rpi_ws281x import PixelStrip, Color
 # WS2812 / NeoPixel
 # =========================
 LED_COUNT = 7
-LED_PIN = 18          # GPIO18 = physical pin 12
+LED_PIN = 18          # GPIO18 = physical pin 12 (PWM0)
 LED_FREQ_HZ = 800000
 LED_DMA = 10
 LED_INVERT = False
@@ -35,15 +45,13 @@ def set_max_white():
 # =========================
 FRAME_W, FRAME_H = 960, 540
 
-# ---- ROI (edit these numbers once to match your plate area) ----
-# ROI is in FULL-FRAME coordinates (0..FRAME_W-1, 0..FRAME_H-1)
-# Start with center-ish ROI; adjust while watching the yellow ROI box.
+# ---- ROI (adjust once to tightly cover only where objects appear) ----
 ROI_X = 260
 ROI_Y = 90
 ROI_W = 440
 ROI_H = 360
 
-# Background capture averaging
+# Background averaging
 BG_FRAMES = 20
 
 # Mask robustness
@@ -52,31 +60,41 @@ MORPH_K = 5
 OPEN_ITERS = 2
 CLOSE_ITERS = 2
 
-# Noise rejection filters (inside ROI)
+# Noise rejection
 MIN_AREA = 800
-MAX_AREA = 40000
+MAX_AREA = 60000
 MIN_W = 18
 MIN_H = 18
 MIN_EXTENT = 0.30
 
 SHOW_DEBUG = True
 
-# ---- Bean shape thresholds (tune for your real beans vs rocks) ----
-# IMPORTANT: In your data, rocks looked "more round/smooth" than beans.
-# So we primarily use "not too round" as bean cue.
-BEAN_AR_MIN = 1.15
-BEAN_AR_MAX = 2.80
-BEAN_CIRC_MAX = 0.78     # beans should NOT be too circular
-BEAN_SOL_MIN = 0.80      # keep mild; solidity is not a strong cue for you
-ELL_AR_MIN = 1.10
-ELL_AR_MAX = 3.20
+# =========================
+# CLASSIFICATION (IMPORTANT)
+# =========================
+# Your observation: rocks look MORE round/smooth than beans.
+# Therefore:
+#   - ROCK tends to have higher circularity (closer to 1.0) and lower aspect ratio (closer to 1.0)
+#   - BEAN tends to be more oval => higher aspect ratio and/or lower circularity
+
+# Strong "rock" cue: too circular
+ROCK_CIRC_MIN = 0.82     # if circularity >= this, treat as ROCK
+
+# Strong "bean" cue: oval-ish (aspect ratio)
+BEAN_AR_MIN = 1.20       # if aspect ratio >= this (and not too circular), treat as BEAN
+
+# Optional extra bean cue: ellipse ratio (if fitEllipse works)
+ELL_AR_MIN = 1.15        # ellipse major/minor ratio threshold for bean
+
+# Safety: if segmentation makes objects look too round, loosen/tighten:
+# - If beans become rocks: increase ROCK_CIRC_MIN to 0.86 OR lower BEAN_AR_MIN to 1.15
+# - If rocks become beans: lower ROCK_CIRC_MIN to 0.78 OR increase BEAN_AR_MIN to 1.25
 
 
 # =========================
 # Helpers
 # =========================
 def clamp_roi(x, y, w, h, W, H):
-    """Ensure ROI stays within image bounds."""
     x = max(0, min(x, W - 1))
     y = max(0, min(y, H - 1))
     w = max(1, min(w, W - x))
@@ -90,7 +108,6 @@ def morph_cleanup(mask: np.ndarray) -> np.ndarray:
     return mask
 
 def capture_background_gray(picam2: Picamera2, roi_rect, n=BG_FRAMES) -> np.ndarray:
-    """Average multiple ROI gray frames to get a stable background reference."""
     rx, ry, rw, rh = roi_rect
     acc = None
     for _ in range(n):
@@ -104,13 +121,12 @@ def capture_background_gray(picam2: Picamera2, roi_rect, n=BG_FRAMES) -> np.ndar
     return (acc / n).astype(np.uint8)
 
 def get_object_mask(roi_bgr: np.ndarray, bg_gray: np.ndarray):
-    """Robust ROI mask: absdiff + Otsu threshold (adapts to lighting)."""
     g1 = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
     g1 = cv2.GaussianBlur(g1, (BLUR_K, BLUR_K), 0)
 
     diff = cv2.absdiff(g1, bg_gray)
 
-    # Dynamic threshold (better than fixed DIFF_THRESH)
+    # Otsu threshold adapts to lighting drift
     _, mask = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     mask = morph_cleanup(mask)
     return mask, diff
@@ -133,7 +149,7 @@ def contour_stats(cnt) -> dict:
     ell_ar = None
     if len(cnt) >= 5:
         try:
-            ellipse = cv2.fitEllipse(cnt)
+            ellipse = cv2.fitEllipse(cnt)  # ((cx,cy),(MA,ma),angle)
             (_, _), (MA, ma), _ = ellipse
             major = max(MA, ma)
             minor = min(MA, ma) + 1e-9
@@ -163,32 +179,35 @@ def is_noise(stats: dict) -> bool:
         return True
     return False
 
-def is_bean(stats: dict) -> bool:
+def classify_bean_or_rock(stats: dict) -> str:
     """
-    NO UNKNOWN: if not bean => rock.
-    Tuned for your observation: rocks often look more round/smooth than beans.
+    NO UNKNOWN:
+      If it is very circular -> ROCK
+      Else if it is oval-ish -> BEAN
+      Else -> ROCK (default)
     """
     ar = stats["aspect"]
     circ = stats["circularity"]
-    sol = stats["solidity"]
     ell_ar = stats["ell_ar"]
 
-    bean_like = (
-        (BEAN_AR_MIN <= ar <= BEAN_AR_MAX) and
-        (circ <= BEAN_CIRC_MAX) and
-        (sol >= BEAN_SOL_MIN)
-    )
-    if ell_ar is not None:
-        bean_like = bean_like and (ELL_AR_MIN <= ell_ar <= ELL_AR_MAX)
+    # Strong rock cue: round
+    if circ >= ROCK_CIRC_MIN:
+        return "ROCK"
 
-    return bean_like
+    # Bean cue: oval by bbox AR, and optionally by ellipse AR
+    if ar >= BEAN_AR_MIN:
+        if ell_ar is None:
+            return "COFFEE BEAN"
+        return "COFFEE BEAN" if ell_ar >= ELL_AR_MIN else "ROCK"
+
+    # Default
+    return "ROCK"
 
 
 # =========================
 # Main
 # =========================
 def main():
-    # Clamp ROI to frame bounds
     roi_rect = clamp_roi(ROI_X, ROI_Y, ROI_W, ROI_H, FRAME_W, FRAME_H)
     rx, ry, rw, rh = roi_rect
 
@@ -201,7 +220,7 @@ def main():
     picam2.configure(config)
     picam2.start()
 
-    # Let AE/AWB settle under LED, then lock
+    # settle AE/AWB under LED, then lock to stabilize subtraction
     time.sleep(1.5)
     try:
         picam2.set_controls({"AeEnable": False, "AwbEnable": False})
@@ -216,20 +235,18 @@ def main():
         frame_rgb = picam2.capture_array()
         full_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-        # Draw ROI box on full frame for visualization
+        # Draw ROI box on full frame
         cv2.rectangle(full_bgr, (rx, ry), (rx + rw, ry + rh), (0, 255, 255), 2)
 
-        # Extract ROI for processing
         roi_bgr = full_bgr[ry:ry + rh, rx:rx + rw]
         vis_roi = roi_bgr.copy()
 
         if bg_gray is None:
             cv2.putText(full_bgr, "Press 'b' to capture BACKGROUND (empty plate)",
                         (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-
             cv2.imshow("PiCam - Bean vs Rock (ROI)", full_bgr)
-            key = cv2.waitKey(1) & 0xFF
 
+            key = cv2.waitKey(1) & 0xFF
             if key == ord('b'):
                 print("Capturing ROI background... keep plate empty & steady")
                 bg_gray = capture_background_gray(picam2, roi_rect)
@@ -238,7 +255,6 @@ def main():
                 break
             continue
 
-        # Mask + contours in ROI coordinates
         obj_mask, diff = get_object_mask(roi_bgr, bg_gray)
         contours, _ = cv2.findContours(obj_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -250,35 +266,37 @@ def main():
             if is_noise(stats):
                 continue
 
-            label = "COFFEE BEAN" if is_bean(stats) else "ROCK"
-
+            label = classify_bean_or_rock(stats)
             x, y, w, h = stats["bbox"]
 
-            # Draw inside ROI view
             if label == "COFFEE BEAN":
                 color = (0, 255, 0); beans += 1
             else:
                 color = (0, 0, 255); rocks += 1
 
+            # Draw on ROI view
             cv2.rectangle(vis_roi, (x, y), (x + w, y + h), color, 2)
             if stats["ellipse"] is not None:
                 cv2.ellipse(vis_roi, stats["ellipse"], color, 2)
+
+            # Draw on FULL frame with ROI offset
+            cv2.rectangle(full_bgr, (x + rx, y + ry), (x + w + rx, y + h + ry), color, 2)
+            if stats["ellipse"] is not None:
+                (cx, cy), (MA, ma), ang = stats["ellipse"]
+                ellipse_full = ((cx + rx, cy + ry), (MA, ma), ang)
+                cv2.ellipse(full_bgr, ellipse_full, color, 2)
 
             txt = (f"{label} AR:{stats['aspect']:.2f} "
                    f"C:{stats['circularity']:.2f} "
                    f"Sol:{stats['solidity']:.2f} "
                    f"A:{stats['area']:.0f}")
-            cv2.putText(vis_roi, txt, (x, max(20, y - 8)),
+            cv2.putText(full_bgr, txt, (x + rx, max(20, y + ry - 8)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
-
-            # Also draw on full frame with ROI offset (optional)
-            cv2.rectangle(full_bgr, (x + rx, y + ry), (x + w + rx, y + h + ry), color, 2)
 
         header = f"Beans: {beans} | Rocks: {rocks}"
         cv2.putText(full_bgr, header, (20, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
 
-        # Show windows
         cv2.imshow("PiCam - Bean vs Rock (ROI)", full_bgr)
         cv2.imshow("ROI View", vis_roi)
 
