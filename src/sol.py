@@ -77,7 +77,11 @@ def capture_background_gray(picam2, roi_rect, n=BG_FRAMES):
 def get_object_mask(roi_bgr, bg_gray):
     g1 = cv2.GaussianBlur(cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY), (BLUR_K, BLUR_K), 0)
     diff = cv2.absdiff(g1, bg_gray)
-    _, mask = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # We use Otsu's to find the base level, then increase it by 10 to ignore shadows
+    thresh_val, _ = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    _, mask = cv2.threshold(diff, thresh_val + 10, 255, cv2.THRESH_BINARY)
+    
     return morph_cleanup(mask), diff
 
 def contour_stats(cnt):
