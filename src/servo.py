@@ -1,141 +1,109 @@
 import time
 from adafruit_servokit import ServoKit
 
-# ----------------------------
-# PCA9685 / ServoKit Setup
-# ----------------------------
 kit = ServoKit(channels=16, address=0x40)
 kit.frequency = 50
 
-# Optional: expand pulse range if your servos move too little.
-# Typical ranges: (500, 2500) or (600, 2400).
 for ch in range(5):
     try:
         kit.servo[ch].set_pulse_width_range(500, 2500)
     except Exception:
         pass
 
-# ----------------------------
-# Channel Mapping (EDIT THIS)
-# ----------------------------
-BASE     = 4 # rotate left/right
-SHOULDER = 3  # up/down
-ELBOW    = 2  # up/down
-WRIST    = 1  # wrist angle
-GRIPPER  = 0  # open/close
+BASE = 0
+SHOULDER = 1
+ELBOW = 2
+WRIST = 3
+GRIPPER = 4
 
-# ----------------------------
-# Timing / Motion Helpers
-# ----------------------------
-MOVE_STEP_DEG = 2
-MOVE_STEP_S   = 0.01
+MOVE_STEP = 2
+MOVE_DELAY = 0.01
 
-def move_servo_smooth(channel: int, target: int, step: int = MOVE_STEP_DEG, delay: float = MOVE_STEP_S):
-    """Smoothly move one servo to target angle."""
+def move(channel, target):
     cur = kit.servo[channel].angle
     if cur is None:
-        # First command after boot: set directly
         kit.servo[channel].angle = target
         time.sleep(0.2)
         return
-
     cur = int(cur)
     target = int(target)
-    if target == cur:
+    if cur == target:
         return
+    step = 1 if target > cur else -1
+    for a in range(cur, target + step, step * MOVE_STEP):
+        kit.servo[channel].angle = a
+        time.sleep(MOVE_DELAY)
 
-    direction = 1 if target > cur else -1
-    for a in range(cur, target + direction, direction * step):
-        kit.servo[channel].angle = max(0, min(180, a))
-        time.sleep(delay)
+def pose(p):
+    for ch in [BASE, SHOULDER, ELBOW, WRIST, GRIPPER]:
+        if ch in p:
+            move(ch, p[ch])
+    time.sleep(0.3)
 
-def move_pose(pose: dict, settle: float = 0.3):
-    """Move multiple servos to a pose. Order matters for arms."""
-    # A safe typical order: base -> shoulder -> elbow -> wrist -> gripper
-    order = [BASE, SHOULDER, ELBOW, WRIST, GRIPPER]
-    for ch in order:
-        if ch in pose:
-            move_servo_smooth(ch, pose[ch])
-    time.sleep(settle)
+GRIP_OPEN = 20
+GRIP_CLOSE = 80
 
-# ----------------------------
-# Gripper Helpers (EDIT THESE)
-# ----------------------------
-GRIP_OPEN_ANGLE  = 20   # adjust to your gripper
-GRIP_CLOSE_ANGLE = 80   # adjust to your gripper
+RESET = {
+    BASE: 0,
+    SHOULDER: 40,
+    ELBOW: 160,
+    WRIST: 20,
+    GRIPPER: GRIP_OPEN
+}
 
-def gripper_open():
-    move_servo_smooth(GRIPPER, GRIP_OPEN_ANGLE)
-    time.sleep(0.2)
-
-def gripper_close():
-    move_servo_smooth(GRIPPER, GRIP_CLOSE_ANGLE)
-    time.sleep(0.2)
-
-# ----------------------------
-# Calibrated Poses (YOU MUST TUNE THESE)
-# ----------------------------
 HOME = {
     BASE: 90,
     SHOULDER: 90,
     ELBOW: 90,
     WRIST: 90,
-    GRIPPER: GRIP_OPEN_ANGLE
+    GRIPPER: GRIP_OPEN
 }
 
-# These three poses represent:
-# - approach above the target (safe height)
-# - down at the target (grab height)
-# - lift after closing gripper
-#
-# "9,4" is a label here; you must tune the angles so the end-effector is at your (x,y).
-PICK_9_4_APPROACH = {
+PICK_APPROACH = {
     BASE: 110,
     SHOULDER: 70,
     ELBOW: 120,
-    WRIST: 90,
+    WRIST: 90
 }
 
-PICK_9_4_DOWN = {
+PICK_DOWN = {
     BASE: 110,
     SHOULDER: 82,
     ELBOW: 135,
-    WRIST: 95,
+    WRIST: 95
 }
 
-PICK_9_4_LIFT = {
+PICK_LIFT = {
     BASE: 110,
     SHOULDER: 70,
     ELBOW: 120,
-    WRIST: 90,
+    WRIST: 90
 }
 
-# ----------------------------
-# Main Routine
-# ----------------------------
-def pick_at_9_4():
-    print("Going HOME")
-    move_pose(HOME)
-    gripper_open()
+def main():
+    print("RESET")
+    pose(RESET)
+    time.sleep(0.5)
 
-    print("Approach (9,4)")
-    move_pose(PICK_9_4_APPROACH)
+    print("HOME")
+    pose(HOME)
+    time.sleep(0.5)
 
-    print("Down to grab")
-    move_pose(PICK_9_4_DOWN)
+    print("APPROACH")
+    pose(PICK_APPROACH)
 
-    print("Close gripper")
-    gripper_close()
+    print("DOWN")
+    pose(PICK_DOWN)
 
-    print("Lift")
-    move_pose(PICK_9_4_LIFT)
+    print("GRAB")
+    move(GRIPPER, GRIP_CLOSE)
+    time.sleep(0.5)
 
-    print("Return HOME")
-    move_pose(HOME)
+    print("LIFT")
+    pose(PICK_LIFT)
+
+    print("RETURN HOME")
+    pose(HOME)
 
 if __name__ == "__main__":
-    try:
-        pick_at_9_4()
-        print("Done.")
-    except KeyboardInterrupt:
-        print("Stopped.")
+    main()
