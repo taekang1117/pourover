@@ -1,79 +1,141 @@
 import time
-import sys
-
-import RPi.GPIO as GPIO
 from adafruit_servokit import ServoKit
 
-# ---- Settings ----
-OE_PIN = 4                 # PCA9685 OE (active-low)
-I2C_ADDR = 0x40            # your i2cdetect shows 0x40
-NUM_SERVOS = 5             # channels 0-4
-FREQ_HZ = 50               # standard servos
-STEP_DELAY = 0.6           # seconds between moves
+# ----------------------------
+# PCA9685 / ServoKit Setup
+# ----------------------------
+kit = ServoKit(channels=16, address=0x40)
+kit.frequency = 50
 
+# Optional: expand pulse range if your servos move too little.
+# Typical ranges: (500, 2500) or (600, 2400).
+for ch in range(5):
+    try:
+        kit.servo[ch].set_pulse_width_range(500, 2500)
+    except Exception:
+        pass
 
-def log(msg: str) -> None:
-    ts = time.strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+# ----------------------------
+# Channel Mapping (EDIT THIS)
+# ----------------------------
+BASE     = 4 # rotate left/right
+SHOULDER = 3  # up/down
+ELBOW    = 2  # up/down
+WRIST    = 1  # wrist angle
+GRIPPER  = 0  # open/close
 
+# ----------------------------
+# Timing / Motion Helpers
+# ----------------------------
+MOVE_STEP_DEG = 2
+MOVE_STEP_S   = 0.01
 
-def outputs_enable(enable: bool) -> None:
-    # OE is active-low
-    GPIO.output(OE_PIN, GPIO.LOW if enable else GPIO.HIGH)
+def move_servo_smooth(channel: int, target: int, step: int = MOVE_STEP_DEG, delay: float = MOVE_STEP_S):
+    """Smoothly move one servo to target angle."""
+    cur = kit.servo[channel].angle
+    if cur is None:
+        # First command after boot: set directly
+        kit.servo[channel].angle = target
+        time.sleep(0.2)
+        return
 
+    cur = int(cur)
+    target = int(target)
+    if target == cur:
+        return
 
-def main() -> None:
-    log("Program start")
-    log(f"Python executable: {sys.executable}")
-    log(f"Python version: {sys.version.split()[0]}")
+    direction = 1 if target > cur else -1
+    for a in range(cur, target + direction, direction * step):
+        kit.servo[channel].angle = max(0, min(180, a))
+        time.sleep(delay)
 
-    # Init GPIO for OE
-    GPIO.setmode(GPIO.BCM)
-    GPIO.setup(OE_PIN, GPIO.OUT)
-    log(f"GPIO OE_PIN={OE_PIN} configured as OUTPUT")
+def move_pose(pose: dict, settle: float = 0.3):
+    """Move multiple servos to a pose. Order matters for arms."""
+    # A safe typical order: base -> shoulder -> elbow -> wrist -> gripper
+    order = [BASE, SHOULDER, ELBOW, WRIST, GRIPPER]
+    for ch in order:
+        if ch in pose:
+            move_servo_smooth(ch, pose[ch])
+    time.sleep(settle)
 
-    # Create ServoKit (talks to PCA9685 over I2C)
-    log(f"Initializing PCA9685 at I2C address 0x{I2C_ADDR:02X} ...")
-    kit = ServoKit(channels=16, address=I2C_ADDR)
-    kit.frequency = FREQ_HZ
-    log(f"PCA9685 initialized; frequency set to {FREQ_HZ} Hz")
+# ----------------------------
+# Gripper Helpers (EDIT THESE)
+# ----------------------------
+GRIP_OPEN_ANGLE  = 20   # adjust to your gripper
+GRIP_CLOSE_ANGLE = 80   # adjust to your gripper
 
-    # Enable outputs
-    outputs_enable(True)
-    log("OE set LOW => outputs ENABLED")
+def gripper_open():
+    move_servo_smooth(GRIPPER, GRIP_OPEN_ANGLE)
     time.sleep(0.2)
 
-    # Basic motion sequence to prove commands are executing
-    sequence = [0, 90, 180, 90]
+def gripper_close():
+    move_servo_smooth(GRIPPER, GRIP_CLOSE_ANGLE)
+    time.sleep(0.2)
 
-    for angle in sequence:
-        log(f"Commanding channels 0-{NUM_SERVOS-1} to angle={angle}")
-        for ch in range(NUM_SERVOS):
-            try:
-                kit.servo[ch].angle = angle
-                log(f"  ch{ch}: angle set to {angle}")
-            except Exception as e:
-                log(f"  ch{ch}: ERROR setting angle -> {e}")
-        time.sleep(STEP_DELAY)
+# ----------------------------
+# Calibrated Poses (YOU MUST TUNE THESE)
+# ----------------------------
+HOME = {
+    BASE: 90,
+    SHOULDER: 90,
+    ELBOW: 90,
+    WRIST: 90,
+    GRIPPER: GRIP_OPEN_ANGLE
+}
 
-    log("Motion sequence complete; holding position for 2 seconds")
-    time.sleep(2.0)
+# These three poses represent:
+# - approach above the target (safe height)
+# - down at the target (grab height)
+# - lift after closing gripper
+#
+# "9,4" is a label here; you must tune the angles so the end-effector is at your (x,y).
+PICK_9_4_APPROACH = {
+    BASE: 110,
+    SHOULDER: 70,
+    ELBOW: 120,
+    WRIST: 90,
+}
 
-    # Optional: disable outputs at end
-    # outputs_enable(False)
-    # log("OE set HIGH => outputs DISABLED")
+PICK_9_4_DOWN = {
+    BASE: 110,
+    SHOULDER: 82,
+    ELBOW: 135,
+    WRIST: 95,
+}
 
+PICK_9_4_LIFT = {
+    BASE: 110,
+    SHOULDER: 70,
+    ELBOW: 120,
+    WRIST: 90,
+}
+
+# ----------------------------
+# Main Routine
+# ----------------------------
+def pick_at_9_4():
+    print("Going HOME")
+    move_pose(HOME)
+    gripper_open()
+
+    print("Approach (9,4)")
+    move_pose(PICK_9_4_APPROACH)
+
+    print("Down to grab")
+    move_pose(PICK_9_4_DOWN)
+
+    print("Close gripper")
+    gripper_close()
+
+    print("Lift")
+    move_pose(PICK_9_4_LIFT)
+
+    print("Return HOME")
+    move_pose(HOME)
 
 if __name__ == "__main__":
     try:
-        main()
-    except Exception as e:
-        log(f"FATAL ERROR: {e}")
-        raise
-    finally:
-        try:
-            GPIO.cleanup()
-            log("GPIO cleanup done")
-        except Exception:
-            pass
-        log("Program end")
+        pick_at_9_4()
+        print("Done.")
+    except KeyboardInterrupt:
+        print("Stopped.")
