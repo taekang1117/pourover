@@ -1,39 +1,79 @@
 import time
+import sys
+
 import RPi.GPIO as GPIO
 from adafruit_servokit import ServoKit
 
-# ---- Pins (BCM numbering) ----
-OE_PIN = 4  # connected to PCA9685 OE (active-low)
+# ---- Settings ----
+OE_PIN = 4                 # PCA9685 OE (active-low)
+I2C_ADDR = 0x40            # your i2cdetect shows 0x40
+NUM_SERVOS = 5             # channels 0-4
+FREQ_HZ = 50               # standard servos
+STEP_DELAY = 0.6           # seconds between moves
 
-# ---- PCA9685 setup ----
-# Most PCA9685 boards default to I2C address 0x40.
-# Change address=0x41, 0x42, etc. if you changed the address jumpers.
-kit = ServoKit(channels=16, address=0x40)
-kit.frequency = 50  # standard servo PWM frequency
 
-# ---- OE control ----
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(OE_PIN, GPIO.OUT)
+def log(msg: str) -> None:
+    ts = time.strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
 
-def outputs_enable(enable: bool):
+
+def outputs_enable(enable: bool) -> None:
     # OE is active-low
     GPIO.output(OE_PIN, GPIO.LOW if enable else GPIO.HIGH)
 
-try:
-    # Enable PWM outputs
+
+def main() -> None:
+    log("Program start")
+    log(f"Python executable: {sys.executable}")
+    log(f"Python version: {sys.version.split()[0]}")
+
+    # Init GPIO for OE
+    GPIO.setmode(GPIO.BCM)
+    GPIO.setup(OE_PIN, GPIO.OUT)
+    log(f"GPIO OE_PIN={OE_PIN} configured as OUTPUT")
+
+    # Create ServoKit (talks to PCA9685 over I2C)
+    log(f"Initializing PCA9685 at I2C address 0x{I2C_ADDR:02X} ...")
+    kit = ServoKit(channels=16, address=I2C_ADDR)
+    kit.frequency = FREQ_HZ
+    log(f"PCA9685 initialized; frequency set to {FREQ_HZ} Hz")
+
+    # Enable outputs
     outputs_enable(True)
-    time.sleep(0.1)
+    log("OE set LOW => outputs ENABLED")
+    time.sleep(0.2)
 
-    # Move 5 servos (channels 0-4) to 90 degrees
-    for ch in range(5):
-        kit.servo[ch].angle = 90
+    # Basic motion sequence to prove commands are executing
+    sequence = [0, 90, 180, 90]
 
-    # Hold position for a bit (optional)
+    for angle in sequence:
+        log(f"Commanding channels 0-{NUM_SERVOS-1} to angle={angle}")
+        for ch in range(NUM_SERVOS):
+            try:
+                kit.servo[ch].angle = angle
+                log(f"  ch{ch}: angle set to {angle}")
+            except Exception as e:
+                log(f"  ch{ch}: ERROR setting angle -> {e}")
+        time.sleep(STEP_DELAY)
+
+    log("Motion sequence complete; holding position for 2 seconds")
     time.sleep(2.0)
 
-    # If you want to disable outputs after moving (optional):
+    # Optional: disable outputs at end
     # outputs_enable(False)
+    # log("OE set HIGH => outputs DISABLED")
 
-finally:
-    # Safety cleanup
-    GPIO.cleanup()
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        log(f"FATAL ERROR: {e}")
+        raise
+    finally:
+        try:
+            GPIO.cleanup()
+            log("GPIO cleanup done")
+        except Exception:
+            pass
+        log("Program end")
