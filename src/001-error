@@ -1,0 +1,63 @@
+pi@raspberrypi:~ $ venv/bin/activate
+bash: venv/bin/activate: Permission denied
+pi@raspberrypi:~ $ source venv/bin/activate
+(venv) pi@raspberrypi:~ $ cd src
+(venv) pi@raspberrypi:~/src $ sudo collect_data.py
+sudo: collect_data.py: command not found
+(venv) pi@raspberrypi:~/src $ sudo python collect_data.py
+Traceback (most recent call last):
+  File "/home/pi/src/collect_data.py", line 7, in <module>
+    import pandas as pd
+ModuleNotFoundError: No module named 'pandas'
+(venv) pi@raspberrypi:~/src $ cd
+(venv) pi@raspberrypi:~ $ sudo python collect_data.py
+python: can't open file '/home/pi/collect_data.py': [Errno 2] No such file or directory
+(venv) pi@raspberrypi:~ $ sudo python collect_data.py
+Traceback (most recent call last):
+  File "/home/pi/collect_data.py", line 7, in <module>
+    import pandas as pd
+ModuleNotFoundError: No module named 'pandas'
+(venv) pi@raspberrypi:~ $ pip install pandas
+Looking in indexes: https://pypi.org/simple, https://www.piwheels.org/simple
+Requirement already satisfied: pandas in ./venv/lib/python3.13/site-packages (3.0.0)
+Requirement already satisfied: numpy>=1.26.0 in ./venv/lib/python3.13/site-packages (from pandas) (2.4.1)
+Requirement already satisfied: python-dateutil>=2.8.2 in ./venv/lib/python3.13/site-packages (from pandas) (2.9.0.post0)
+Requirement already satisfied: six>=1.5 in ./venv/lib/python3.13/site-packages (from python-dateutil>=2.8.2->pandas) (1.17.0)
+(venv) pi@raspberrypi:~ $ sudo python collect_data.py
+Traceback (most recent call last):
+  File "/home/pi/collect_data.py", line 7, in <module>
+    import pandas as pd
+ModuleNotFoundError: No module named 'pandas'
+(venv) pi@raspberrypi:~ $ python collect_data.py
+Traceback (most recent call last):
+  File "/home/pi/collect_data.py", line 8, in <module>
+    from picamera2 import Picamera2
+ModuleNotFoundError: No module named 'picamera2'
+(venv) pi@raspberrypi:~ $ apt update
+Error: Could not open lock file /var/lib/apt/lists/lock - open (13: Permission denied)
+Error: Unable to lock directory /var/lib/apt/lists/
+Warning: Problem unlinking the file /var/cache/apt/pkgcache.bin - RemoveCaches (13: Permission denied)
+Warning: Problem unlinking the file /var/cache/apt/srcpkgcache.bin - RemoveCaches (13: Permission denied)
+(venv) pi@raspberrypi:~ $ sudo apt update
+Hit:1 http://deb.debian.org/debian trixie InRelease
+Hit:2 http://deb.debian.org/debian trixie-updates InRelease                    
+Hit:3 http://deb.debian.org/debian-security trixie-security InRelease          
+Hit:4 http://archive.raspberrypi.com/debian trixie InRelease                   
+Get:5 https://pkgs.tailscale.com/stable/debian trixie InRelease                
+Fetched 6,582 B in 0s (13.5 kB/s)
+163 packages can be upgraded. Run 'apt list --upgradable' to see them.
+(venv) pi@raspberrypi:~ $ sudo apt install -y python3-picamera2
+python3-picamera2 is already the newest version (0.3.33-1).
+Summary:
+  Upgrading: 0, Installing: 0, Removing: 0, Not Upgrading: 163
+(venv) pi@raspberrypi:~ $ sudo python collect_data.py
+Traceback (most recent call last):
+  File "/home/pi/collect_data.py", line 7, in <module>
+    import pandas as pd
+ModuleNotFoundError: No module named 'pandas'
+(venv) pi@raspberrypi:~ $ python collect_data.py
+Traceback (most recent call last):
+  File "/home/pi/collect_data.py", line 8, in <module>
+    from picamera2 import Picamera2
+ModuleNotFoundError: No module named 'picamera2'
+(venv) pi@raspberrypi:~ $ 
