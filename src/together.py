@@ -6,11 +6,7 @@ STEPPERS_OFF (disable stepper drivers)
 
 SETTLE (wait 0.3–1.0s OR blur-threshold)
 
-LIGHT_ON
-
-CAPTURE
-
-DETECT
+LIGHT_ON #CAPTURE, DETECT
 
 SORT (flip plane stepper move)
 
