@@ -1,5 +1,13 @@
 # camotor.py - RandomForest Inference + WS2812 Light + ULN2003 Flipper
-# Run: sudo /home/pi/venv/bin/python camotor.py
+# Behavior:
+# - Press 'b' to capture background (ROI must be empty)
+# - Wait until object is present + stable
+# - If ANY rock is seen during stable window -> flip LEFT (rock side)
+#   Else if any bean is seen -> flip RIGHT (bean side)
+# - Always return to center after flipping
+#
+# Run:
+#   sudo /home/pi/venv/bin/python camotor.py
 
 import time
 import cv2
@@ -44,10 +52,9 @@ FLIP_IN4 = 19
 FLIP_STEP_DELAY = 0.0015
 
 # === Flipper position control (steps relative to CENTER) ===
-# Tune these so it diverts correctly then returns to center.
-POS_RIGHT = +650     # BEAN side (RIGHT)
-POS_LEFT  = -650     # ROCK side (LEFT)
-DROP_WAIT_SEC = 0.35 # wait for object to fall before returning
+POS_RIGHT = +650     # BEAN side (RIGHT) - tune
+POS_LEFT  = -650     # ROCK side (LEFT)  - tune
+DROP_WAIT_SEC = 0.35 # time for object to fall before returning
 
 class ULN2003Stepper:
     # Half-step sequence for 28BYJ-48
@@ -109,11 +116,13 @@ def move_to(stepper, target_pos, current_pos):
 FRAME_W, FRAME_H = 960, 540
 ROI_X, ROI_Y, ROI_W, ROI_H = 260, 90, 440, 360
 
-BLUR_K = 7          # increased for stability
+BLUR_K = 7
 MORPH_K = 5
 OPEN_ITERS = 2
 CLOSE_ITERS = 2
-MIN_AREA = 1200     # increased to reduce noise
+
+# IMPORTANT: single bean may be small -> keep MIN_AREA not too high
+MIN_AREA = 800
 MAX_AREA = 40000
 
 MODEL_FILE = "bean_model.pkl"
@@ -229,6 +238,10 @@ def main():
     stable_cnt = 0
     last_label = None  # "BEAN" or "ROCK"
 
+    # Max counts observed during the stable window (fixes "single object detected but no flip")
+    beans_max = 0
+    rocks_max = 0
+
     print("Inference + Flip Mode")
     print("b: Capture Background | q: Quit")
 
@@ -287,35 +300,47 @@ def main():
                 cv2.putText(full_bgr, header, (20, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
 
-                # Mini-FSM: detect -> stable -> classify -> flip -> return -> wait clear
+                # ===== Mini-FSM: detect -> stable -> decide -> flip -> return -> wait clear =====
                 if state == "WAIT_OBJECT":
                     stable_cnt = 0
                     last_label = None
+                    beans_max = 0
+                    rocks_max = 0
                     if mask_area > PRESENT_THRESH:
                         state = "CLASSIFY"
 
                 elif state == "CLASSIFY":
                     if mask_area > PRESENT_THRESH:
                         stable_cnt += 1
+
+                        # Accumulate max seen during stable window
+                        if beans_count > beans_max:
+                            beans_max = beans_count
+                        if rocks_count > rocks_max:
+                            rocks_max = rocks_count
                     else:
                         stable_cnt = 0
+                        beans_max = 0
+                        rocks_max = 0
                         state = "WAIT_OBJECT"
 
                     if stable_cnt >= STABLE_FRAMES:
-                        # Settle before making a decision
                         time.sleep(SETTLE_SEC)
 
-                        # Decision rule:
-                        # If any ROCK detected -> ROCK; else if any BEAN -> BEAN
-                        if rocks_count > 0:
+                        # RULE YOU WANT:
+                        # If any rock appeared at any time in stable window -> ROCK side
+                        # else if any bean appeared -> BEAN side
+                        if rocks_max > 0:
                             last_label = "ROCK"
                             state = "FLIP"
-                        elif beans_count > 0:
+                        elif beans_max > 0:
                             last_label = "BEAN"
                             state = "FLIP"
                         else:
-                            # Object present but got filtered out this frame; re-stabilize
+                            # Object present but never produced valid contours
                             stable_cnt = 0
+                            beans_max = 0
+                            rocks_max = 0
 
                 elif state == "FLIP":
                     # Move to target side
@@ -341,9 +366,9 @@ def main():
                     if mask_area < CLEAR_THRESH:
                         state = "WAIT_OBJECT"
 
-                # Debug overlay
-                cv2.putText(full_bgr, f"State: {state} mask_area={mask_area} stable={stable_cnt}",
-                            (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                # Debug overlay (user-edited line)
+                cv2.putText(full_bgr, f"State:{state} mask={mask_area} stable={stable_cnt} bMax={beans_max} rMax={rocks_max}",
+                            (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
 
                 cv2.imshow("Mask", mask)
 
@@ -360,6 +385,8 @@ def main():
                 state = "WAIT_OBJECT"
                 stable_cnt = 0
                 last_label = None
+                beans_max = 0
+                rocks_max = 0
 
     finally:
         try:
