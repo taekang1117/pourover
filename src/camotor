@@ -1,12 +1,11 @@
 # camotor.py - RandomForest Inference + WS2812 Light + ULN2003 Flipper
-# Modified per request: REMOVE WAIT_CLEAR (immediately re-arm after each flip)
-# Behavior:
-# - Press 'b' to capture background (ROI must be empty)
-# - Wait until object is present + stable
-# - If ANY rock is seen during stable window -> flip LEFT (rock side)
-#   Else if any bean is seen -> flip RIGHT (bean side)
-# - Always return to center after flipping
-# - After flip, immediately go back to WAIT_OBJECT (no WAIT_CLEAR)
+# FSM:
+#   WAIT_OBJECT -> CLASSIFY -> FLIP -> WAIT_CLEAR -> WAIT_OBJECT
+# WAIT_CLEAR has TIMEOUT so it won't get stuck forever.
+#
+# Rule:
+#   If ANY rock is seen during stable window => ROCK side (LEFT)
+#   Else if any bean is seen => BEAN side (RIGHT)
 #
 # Run:
 #   sudo /home/pi/venv/bin/python camotor.py
@@ -44,25 +43,19 @@ def set_max_white():
 # =========================
 # ULN2003 Stepper Setup (28BYJ-48 5V)
 # =========================
-# Wire ULN2003 IN1..IN4 to these GPIOs (BCM numbering):
 FLIP_IN1 = 5
 FLIP_IN2 = 6
 FLIP_IN3 = 13
 FLIP_IN4 = 19
 
-# Stepper speed (tune)
 FLIP_STEP_DELAY = 0.0018
 
-# === Flipper position control (steps relative to CENTER) ===
-POS_RIGHT = +650     # BEAN side (RIGHT) - tune
-POS_LEFT  = -650     # ROCK side (LEFT)  - tune
-DROP_WAIT_SEC = 0.35 # time for object to fall before returning
-
-# Cooldown so it doesn't flip too fast while objects remain in ROI
-FLIP_COOLDOWN_SEC = 0.9
+# Flipper positions (steps relative to CENTER) — tune these
+POS_RIGHT = +650     # BEAN side (RIGHT)
+POS_LEFT  = -650     # ROCK side (LEFT)
+DROP_WAIT_SEC = 0.35
 
 class ULN2003Stepper:
-    # Half-step sequence for 28BYJ-48
     HALF_SEQ = [
         (1,0,0,0),
         (1,1,0,0),
@@ -108,7 +101,6 @@ class ULN2003Stepper:
         self.GPIO.cleanup()
 
 def move_to(stepper, target_pos, current_pos):
-    """Move from current_pos to target_pos using relative step count."""
     delta = int(target_pos - current_pos)
     if delta == 0:
         return current_pos
@@ -126,7 +118,6 @@ MORPH_K = 5
 OPEN_ITERS = 2
 CLOSE_ITERS = 2
 
-# IMPORTANT: single bean may be small -> keep MIN_AREA not too high
 MIN_AREA = 800
 MAX_AREA = 40000
 
@@ -134,8 +125,12 @@ MODEL_FILE = "bean_model.pkl"
 
 # Presence / stability tuning
 PRESENT_THRESH = 3000
+CLEAR_THRESH   = 1500
 STABLE_FRAMES  = 6
 SETTLE_SEC     = 0.08
+
+# WAIT_CLEAR timeout (recommended option A)
+MAX_WAIT_CLEAR_SEC = 2.0
 
 # =========================
 # Helpers
@@ -143,7 +138,6 @@ SETTLE_SEC     = 0.08
 def load_model():
     if not os.path.exists(MODEL_FILE):
         print(f"ERROR: {MODEL_FILE} not found!")
-        print("Please run collect_data.py then train_model.py first.")
         return None
     with open(MODEL_FILE, "rb") as f:
         model = pickle.load(f)
@@ -185,8 +179,6 @@ def get_object_mask(roi_bgr, bg_gray):
     return mask
 
 def get_features_vector(cnt):
-    # MUST MATCH train_model.py order:
-    # ['area', 'aspect_ratio', 'circularity', 'solidity', 'perimeter']
     area = float(cv2.contourArea(cnt))
     perim = float(cv2.arcLength(cnt, True))
     if perim == 0:
@@ -211,12 +203,10 @@ def main():
     if model is None:
         sys.exit(1)
 
-    # Stepper init + position tracking
     stepper = ULN2003Stepper(FLIP_IN1, FLIP_IN2, FLIP_IN3, FLIP_IN4,
                              step_delay=FLIP_STEP_DELAY)
-    flip_pos = 0  # 0 == center
+    flip_pos = 0
 
-    # Camera init
     roi_rect = clamp_roi(ROI_X, ROI_Y, ROI_W, ROI_H, FRAME_W, FRAME_H)
     rx, ry, rw, rh = roi_rect
 
@@ -237,18 +227,16 @@ def main():
 
     bg_gray = None
 
-    # FSM vars
     state = "WAIT_OBJECT"
     stable_cnt = 0
-    last_label = None  # "BEAN" or "ROCK"
+    last_label = None
 
-    # Max counts observed during stable window
     beans_max = 0
     rocks_max = 0
 
-    last_flip_t = 0.0
+    clear_start_t = 0.0
 
-    print("Inference + Flip Mode (NO WAIT_CLEAR)")
+    print("Inference + Flip Mode (WAIT_CLEAR + TIMEOUT)")
     print("b: Capture Background | q: Quit")
 
     try:
@@ -304,7 +292,7 @@ def main():
                 cv2.putText(full_bgr, header, (20, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
 
-                # ===== FSM: WAIT_OBJECT -> CLASSIFY -> FLIP -> (back to WAIT_OBJECT) =====
+                # ===== FSM =====
                 if state == "WAIT_OBJECT":
                     stable_cnt = 0
                     last_label = None
@@ -329,7 +317,7 @@ def main():
                     if stable_cnt >= STABLE_FRAMES:
                         time.sleep(SETTLE_SEC)
 
-                        # Rule: any rock -> ROCK, else any bean -> BEAN
+                        # Rock wins (also covers "both present")
                         if rocks_max > 0:
                             last_label = "ROCK"
                             state = "FLIP"
@@ -342,36 +330,27 @@ def main():
                             rocks_max = 0
 
                 elif state == "FLIP":
-                    # cooldown guard
-                    if time.time() - last_flip_t < FLIP_COOLDOWN_SEC:
-                        state = "WAIT_OBJECT"
-                        stable_cnt = 0
-                        last_label = None
-                        beans_max = 0
-                        rocks_max = 0
+                    if last_label == "BEAN":
+                        print("Flip RIGHT (BEAN)")
+                        flip_pos = move_to(stepper, POS_RIGHT, flip_pos)
                     else:
-                        last_flip_t = time.time()
+                        print("Flip LEFT (ROCK)")
+                        flip_pos = move_to(stepper, POS_LEFT, flip_pos)
 
-                        if last_label == "BEAN":
-                            print("Flip RIGHT (BEAN)")
-                            flip_pos = move_to(stepper, POS_RIGHT, flip_pos)
-                        else:
-                            print("Flip LEFT (ROCK)")
-                            flip_pos = move_to(stepper, POS_LEFT, flip_pos)
+                    time.sleep(DROP_WAIT_SEC)
 
-                        time.sleep(DROP_WAIT_SEC)
+                    flip_pos = move_to(stepper, 0, flip_pos)
+                    stepper.release()
 
-                        flip_pos = move_to(stepper, 0, flip_pos)
-                        stepper.release()
+                    clear_start_t = time.time()
+                    state = "WAIT_CLEAR"
 
-                        # Immediately re-arm (NO WAIT_CLEAR)
+                elif state == "WAIT_CLEAR":
+                    # Re-arm when cleared OR after timeout (option A)
+                    if mask_area < CLEAR_THRESH or (time.time() - clear_start_t) > MAX_WAIT_CLEAR_SEC:
                         state = "WAIT_OBJECT"
-                        stable_cnt = 0
-                        last_label = None
-                        beans_max = 0
-                        rocks_max = 0
 
-                # Debug overlay (your edited format)
+                # Debug overlay (your format)
                 cv2.putText(full_bgr, f"State:{state} mask={mask_area} stable={stable_cnt} bMax={beans_max} rMax={rocks_max}",
                             (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
 
