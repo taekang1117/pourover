@@ -1,5 +1,5 @@
-# main_rf_flip.py - RandomForest Inference + Flipping Stepper (ULN2003)
-# Run: sudo python3 main_rf_flip.py
+# camotor.py - RandomForest Inference + WS2812 Light + ULN2003 Flipper
+# Run: sudo /home/pi/venv/bin/python camotor.py
 
 import time
 import cv2
@@ -40,18 +40,17 @@ FLIP_IN2 = 6
 FLIP_IN3 = 13
 FLIP_IN4 = 19
 
-# Flip tuning
-FLIP_STEPS_BEAN = 600     # tune: how far to flip for BEAN path (RIGHT)
-FLIP_STEPS_ROCK = 600     # tune: how far to flip for ROCK path (LEFT)
-FLIP_STEP_DELAY = 0.0015  # tune speed (too fast => skip)
+# Stepper speed (tune)
+FLIP_STEP_DELAY = 0.0015
 
-# Presence detection tuning
-PRESENT_THRESH = 2500  # mask nonzero pixels => "object present"
-CLEAR_THRESH   = 1200  # lower than PRESENT for hysteresis
-STABLE_FRAMES  = 3     # require stable frames before classifying
+# === Flipper position control (steps relative to CENTER) ===
+# Tune these so it diverts correctly then returns to center.
+POS_RIGHT = +650     # BEAN side (RIGHT)
+POS_LEFT  = -650     # ROCK side (LEFT)
+DROP_WAIT_SEC = 0.35 # wait for object to fall before returning
 
 class ULN2003Stepper:
-    # Half-step sequence
+    # Half-step sequence for 28BYJ-48
     HALF_SEQ = [
         (1,0,0,0),
         (1,1,0,0),
@@ -96,23 +95,37 @@ class ULN2003Stepper:
         self.release()
         self.GPIO.cleanup()
 
+def move_to(stepper, target_pos, current_pos):
+    """Move from current_pos to target_pos using relative step count."""
+    delta = int(target_pos - current_pos)
+    if delta == 0:
+        return current_pos
+    stepper.step(abs(delta), direction=+1 if delta > 0 else -1)
+    return target_pos
+
 # =========================
-# Configuration (from your code)
+# Camera / Vision Configuration
 # =========================
 FRAME_W, FRAME_H = 960, 540
 ROI_X, ROI_Y, ROI_W, ROI_H = 260, 90, 440, 360
 
-BLUR_K = 5
+BLUR_K = 7          # increased for stability
 MORPH_K = 5
 OPEN_ITERS = 2
 CLOSE_ITERS = 2
-MIN_AREA = 800
+MIN_AREA = 1200     # increased to reduce noise
 MAX_AREA = 40000
 
 MODEL_FILE = "bean_model.pkl"
 
+# Presence / stability tuning
+PRESENT_THRESH = 3000
+CLEAR_THRESH   = 1500
+STABLE_FRAMES  = 6
+SETTLE_SEC     = 0.08
+
 # =========================
-# Helpers (from your code)
+# Helpers
 # =========================
 def load_model():
     if not os.path.exists(MODEL_FILE):
@@ -178,23 +191,28 @@ def get_features_vector(cnt):
     return [area, aspect_ratio_invariant, circularity, solidity, perim]
 
 # =========================
-# Main (modified)
+# Main
 # =========================
 def main():
     model = load_model()
     if model is None:
         sys.exit(1)
 
-    # Stepper init
-    stepper = ULN2003Stepper(FLIP_IN1, FLIP_IN2, FLIP_IN3, FLIP_IN4, step_delay=FLIP_STEP_DELAY)
+    # Stepper init + position tracking
+    stepper = ULN2003Stepper(FLIP_IN1, FLIP_IN2, FLIP_IN3, FLIP_IN4,
+                             step_delay=FLIP_STEP_DELAY)
+    flip_pos = 0  # 0 == center
 
+    # Camera init
     roi_rect = clamp_roi(ROI_X, ROI_Y, ROI_W, ROI_H, FRAME_W, FRAME_H)
     rx, ry, rw, rh = roi_rect
 
     picam2 = Picamera2()
     set_max_white()
 
-    config = picam2.create_preview_configuration(main={"format": "RGB888", "size": (FRAME_W, FRAME_H)})
+    config = picam2.create_preview_configuration(
+        main={"format": "RGB888", "size": (FRAME_W, FRAME_H)}
+    )
     picam2.configure(config)
     picam2.start()
 
@@ -206,7 +224,7 @@ def main():
 
     bg_gray = None
 
-    # Mini-FSM vars
+    # FSM vars
     state = "WAIT_OBJECT"
     stable_cnt = 0
     last_label = None  # "BEAN" or "ROCK"
@@ -228,54 +246,48 @@ def main():
             mask_area = 0
 
             if bg_gray is None:
-                cv2.putText(full_bgr, "Press 'b' for BACKGROUND", (20, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                cv2.putText(full_bgr, "Press 'b' for BACKGROUND (empty ROI)",
+                            (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
             else:
+                # Mask + contours
                 mask = get_object_mask(roi_bgr, bg_gray)
                 mask_area = int(cv2.countNonZero(mask))
                 contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
                 feature_list = []
-                valid_contours = []
                 coords = []
 
                 for cnt in contours:
                     a = cv2.contourArea(cnt)
                     if a < MIN_AREA or a > MAX_AREA:
                         continue
-
                     vec = get_features_vector(cnt)
                     if vec:
                         feature_list.append(vec)
-                        valid_contours.append(cnt)
-                        coords.append(cv2.boundingRect(cnt))  # (x,y,w,h)
+                        coords.append(cv2.boundingRect(cnt))
 
+                # Predict
                 if feature_list:
                     preds = model.predict(feature_list)
-
                     for i, label in enumerate(preds):
                         x, y, w, h = coords[i]
-
-                        if label == 1:  # BEAN
+                        if label == 1:
+                            beans_count += 1
                             color = (0, 255, 0)
                             text = "BEAN"
-                            beans_count += 1
-                        else:           # ROCK
+                        else:
+                            rocks_count += 1
                             color = (0, 0, 255)
                             text = "ROCK"
-                            rocks_count += 1
-
-                        cv2.rectangle(vis_roi, (x, y), (x+w, y+h), color, 2)
-                        cv2.putText(vis_roi, text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                        cv2.rectangle(vis_roi, (x, y), (x + w, y + h), color, 2)
+                        cv2.putText(vis_roi, text, (x, y - 6),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
                 header = f"Beans: {beans_count} | Rocks: {rocks_count}"
                 cv2.putText(full_bgr, header, (20, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
 
-                # Show mask window
-                cv2.imshow("Mask", mask)
-
-                # ===== Mini-FSM: detect -> classify -> flip once -> wait clear =====
+                # Mini-FSM: detect -> stable -> classify -> flip -> return -> wait clear
                 if state == "WAIT_OBJECT":
                     stable_cnt = 0
                     last_label = None
@@ -290,7 +302,11 @@ def main():
                         state = "WAIT_OBJECT"
 
                     if stable_cnt >= STABLE_FRAMES:
-                        # Decision rule: if ANY rock => ROCK else if any bean => BEAN
+                        # Settle before making a decision
+                        time.sleep(SETTLE_SEC)
+
+                        # Decision rule:
+                        # If any ROCK detected -> ROCK; else if any BEAN -> BEAN
                         if rocks_count > 0:
                             last_label = "ROCK"
                             state = "FLIP"
@@ -298,27 +314,38 @@ def main():
                             last_label = "BEAN"
                             state = "FLIP"
                         else:
-                            # present but filtered out
+                            # Object present but got filtered out this frame; re-stabilize
                             stable_cnt = 0
 
                 elif state == "FLIP":
+                    # Move to target side
                     if last_label == "BEAN":
                         print("Flip RIGHT (BEAN)")
-                        stepper.step(FLIP_STEPS_BEAN, direction=+1)
+                        flip_pos = move_to(stepper, POS_RIGHT, flip_pos)
                     else:
                         print("Flip LEFT (ROCK)")
-                        stepper.step(FLIP_STEPS_ROCK, direction=-1)
+                        flip_pos = move_to(stepper, POS_LEFT, flip_pos)
 
+                    # Wait for drop
+                    time.sleep(DROP_WAIT_SEC)
+
+                    # Return to center every time
+                    flip_pos = move_to(stepper, 0, flip_pos)
+
+                    # Release after returning (optional)
                     stepper.release()
+
                     state = "WAIT_CLEAR"
 
                 elif state == "WAIT_CLEAR":
                     if mask_area < CLEAR_THRESH:
                         state = "WAIT_OBJECT"
 
-                # On-screen debug
-                cv2.putText(full_bgr, f"State: {state} mask_area={mask_area}",
+                # Debug overlay
+                cv2.putText(full_bgr, f"State: {state} mask_area={mask_area} stable={stable_cnt}",
                             (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+                cv2.imshow("Mask", mask)
 
             cv2.imshow("Review", full_bgr)
             cv2.imshow("Inference", vis_roi)
@@ -327,7 +354,7 @@ def main():
             if key == ord('q'):
                 break
             elif key == ord('b'):
-                print("Capturing background...")
+                print("Capturing background (make sure ROI is empty)...")
                 bg_gray = capture_background_gray(picam2, roi_rect)
                 print("Background captured.")
                 state = "WAIT_OBJECT"
@@ -335,7 +362,10 @@ def main():
                 last_label = None
 
     finally:
-        picam2.stop()
+        try:
+            picam2.stop()
+        except:
+            pass
         cv2.destroyAllWindows()
         stepper.cleanup()
 
