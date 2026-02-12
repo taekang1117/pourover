@@ -1,22 +1,36 @@
-# camotor.py - RandomForest Inference + WS2812 Light + ULN2003 Flipper
-# Behavior:
-# - Press 'b' to capture background (ROI must be empty)
-# - Wait until object is present + stable
-# - If ANY rock is seen during stable window -> flip LEFT (rock side)
-#   Else if any bean is seen -> flip RIGHT (bean side)
-# - Always return to center after flipping
-#
+# fsm_rf_system.py
+# LED: WS2812 on GPIO18
 # Run:
-#   sudo /home/pi/venv/bin/python camotor.py
+#   sudo python3 fsm_rf_system.py
+# or if using venv:
+#   sudo -E /home/pi/venv/bin/python3 fsm_rf_system.py
 
 import time
-import cv2
-import numpy as np
-import pickle
-from picamera2 import Picamera2
-from rpi_ws281x import PixelStrip, Color
 import os
 import sys
+import pickle
+from enum import Enum, auto
+
+import cv2
+import numpy as np
+from picamera2 import Picamera2
+from rpi_ws281x import PixelStrip, Color
+
+# =========================
+# STATES (yours)
+# =========================
+class State(Enum):
+    IDLE = auto()
+    FEED_PULSE = auto()
+    STEPPERS_OFF = auto()
+    SETTLE = auto()
+    LIGHT_ON = auto()   # includes CAPTURE + DETECT
+    SORT = auto()
+    WEIGH_CHECK = auto()
+    ARM_PICK = auto()
+    DELIVER = auto()
+    DONE = auto()
+    ERROR = auto()
 
 # =========================
 # WS2812 / NeoPixel Setup
@@ -29,121 +43,49 @@ LED_INVERT = False
 LED_BRIGHTNESS = 255
 LED_CHANNEL = 0
 
-strip = PixelStrip(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA,
-                   LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL)
+strip = PixelStrip(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL)
 
-def set_max_white():
+def leds_init_once():
     strip.begin()
+
+def leds_white_on():
     white = Color(255, 255, 255)
     for i in range(LED_COUNT):
         strip.setPixelColor(i, white)
     strip.show()
 
-# =========================
-# ULN2003 Stepper Setup (28BYJ-48 5V)
-# =========================
-# Wire ULN2003 IN1..IN4 to these GPIOs (BCM numbering):
-FLIP_IN1 = 5
-FLIP_IN2 = 6
-FLIP_IN3 = 13
-FLIP_IN4 = 19
-
-# Stepper speed (tune)
-FLIP_STEP_DELAY = 0.0015
-
-# === Flipper position control (steps relative to CENTER) ===
-POS_RIGHT = +650     # BEAN side (RIGHT) - tune
-POS_LEFT  = -650     # ROCK side (LEFT)  - tune
-DROP_WAIT_SEC = 0.35 # time for object to fall before returning
-
-class ULN2003Stepper:
-    # Half-step sequence for 28BYJ-48
-    HALF_SEQ = [
-        (1,0,0,0),
-        (1,1,0,0),
-        (0,1,0,0),
-        (0,1,1,0),
-        (0,0,1,0),
-        (0,0,1,1),
-        (0,0,0,1),
-        (1,0,0,1),
-    ]
-
-    def __init__(self, in1, in2, in3, in4, step_delay=0.002):
-        import RPi.GPIO as GPIO
-        self.GPIO = GPIO
-        self.pins = [in1, in2, in3, in4]
-        self.step_delay = step_delay
-        self._idx = 0
-
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
-        for p in self.pins:
-            GPIO.setup(p, GPIO.OUT)
-            GPIO.output(p, 0)
-
-    def _write(self, a, b, c, d):
-        self.GPIO.output(self.pins[0], a)
-        self.GPIO.output(self.pins[1], b)
-        self.GPIO.output(self.pins[2], c)
-        self.GPIO.output(self.pins[3], d)
-
-    def step(self, steps, direction=1):
-        direction = 1 if direction >= 0 else -1
-        for _ in range(abs(int(steps))):
-            self._idx = (self._idx + direction) % len(self.HALF_SEQ)
-            self._write(*self.HALF_SEQ[self._idx])
-            time.sleep(self.step_delay)
-
-    def release(self):
-        self._write(0, 0, 0, 0)
-
-    def cleanup(self):
-        self.release()
-        self.GPIO.cleanup()
-
-def move_to(stepper, target_pos, current_pos):
-    """Move from current_pos to target_pos using relative step count."""
-    delta = int(target_pos - current_pos)
-    if delta == 0:
-        return current_pos
-    stepper.step(abs(delta), direction=+1 if delta > 0 else -1)
-    return target_pos
+def leds_off():
+    black = Color(0, 0, 0)
+    for i in range(LED_COUNT):
+        strip.setPixelColor(i, black)
+    strip.show()
 
 # =========================
-# Camera / Vision Configuration
+# Configuration (yours)
 # =========================
 FRAME_W, FRAME_H = 960, 540
 ROI_X, ROI_Y, ROI_W, ROI_H = 260, 90, 440, 360
 
-BLUR_K = 7
+BLUR_K = 5
 MORPH_K = 5
 OPEN_ITERS = 2
 CLOSE_ITERS = 2
-
-# IMPORTANT: single bean may be small -> keep MIN_AREA not too high
 MIN_AREA = 800
 MAX_AREA = 40000
 
 MODEL_FILE = "bean_model.pkl"
 
-# Presence / stability tuning
-PRESENT_THRESH = 3000
-CLEAR_THRESH   = 1500
-STABLE_FRAMES  = 6
-SETTLE_SEC     = 0.08
-
 # =========================
-# Helpers
+# CV Helpers (yours)
 # =========================
-def load_model():
-    if not os.path.exists(MODEL_FILE):
-        print(f"ERROR: {MODEL_FILE} not found!")
+def load_model(model_path: str):
+    if not os.path.exists(model_path):
+        print(f"ERROR: {model_path} not found!")
         print("Please run collect_data.py then train_model.py first.")
         return None
-    with open(MODEL_FILE, "rb") as f:
+    with open(model_path, "rb") as f:
         model = pickle.load(f)
-    print(f"Loaded model from {MODEL_FILE}")
+    print(f"Loaded model from {model_path}")
     return model
 
 def clamp_roi(x, y, w, h, W, H):
@@ -169,7 +111,6 @@ def capture_background_gray(picam2, roi_rect, n=20):
         g = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY).astype(np.float32)
         g = cv2.GaussianBlur(g, (BLUR_K, BLUR_K), 0)
         acc = g if acc is None else acc + g
-        time.sleep(0.02)
     return (acc / n).astype(np.uint8)
 
 def get_object_mask(roi_bgr, bg_gray):
@@ -192,7 +133,7 @@ def get_features_vector(cnt):
 
     hull = cv2.convexHull(cnt)
     hull_area = float(cv2.contourArea(hull))
-    solidity = area / hull_area if hull_area > 0 else 0
+    solidity = area / hull_area if hull_area > 0 else 0.0
 
     x, y, w, h = cv2.boundingRect(cnt)
     aspect_ratio_invariant = float(max(w, h)) / (min(w, h) + 1e-9)
@@ -200,201 +141,237 @@ def get_features_vector(cnt):
     return [area, aspect_ratio_invariant, circularity, solidity, perim]
 
 # =========================
-# Main
+# One-shot detection (for FSM LIGHT_ON)
 # =========================
-def main():
-    model = load_model()
-    if model is None:
-        sys.exit(1)
-
-    # Stepper init + position tracking
-    stepper = ULN2003Stepper(FLIP_IN1, FLIP_IN2, FLIP_IN3, FLIP_IN4,
-                             step_delay=FLIP_STEP_DELAY)
-    flip_pos = 0  # 0 == center
-
-    # Camera init
-    roi_rect = clamp_roi(ROI_X, ROI_Y, ROI_W, ROI_H, FRAME_W, FRAME_H)
+def detect_once(picam2, model, roi_rect, bg_gray):
+    """
+    Capture 1 frame -> ROI -> mask -> contours -> RF predict
+    Returns: beans_count, rocks_count, decision("BEAN"/"ROCK"/"NONE")
+    """
     rx, ry, rw, rh = roi_rect
 
-    picam2 = Picamera2()
-    set_max_white()
+    frame_rgb = picam2.capture_array()
+    full_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
+    roi_bgr = full_bgr[ry:ry + rh, rx:rx + rw]
 
-    config = picam2.create_preview_configuration(
-        main={"format": "RGB888", "size": (FRAME_W, FRAME_H)}
-    )
-    picam2.configure(config)
-    picam2.start()
+    mask = get_object_mask(roi_bgr, bg_gray)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    time.sleep(1.5)
-    try:
-        picam2.set_controls({"AeEnable": False, "AwbEnable": False})
-    except:
-        pass
+    feature_list = []
+    for cnt in contours:
+        a = cv2.contourArea(cnt)
+        if a < MIN_AREA or a > MAX_AREA:
+            continue
+        vec = get_features_vector(cnt)
+        if vec:
+            feature_list.append(vec)
 
-    bg_gray = None
+    beans_count = 0
+    rocks_count = 0
 
-    # FSM vars
-    state = "WAIT_OBJECT"
-    stable_cnt = 0
-    last_label = None  # "BEAN" or "ROCK"
+    if feature_list:
+        preds = model.predict(feature_list)
+        for label in preds:
+            if int(label) == 1:
+                beans_count += 1
+            else:
+                rocks_count += 1
 
-    # Max counts observed during the stable window (fixes "single object detected but no flip")
-    beans_max = 0
-    rocks_max = 0
+    # Decision policy (simple + safe):
+    # if any ROCK -> ROCK else if any BEAN -> BEAN else NONE
+    if rocks_count > 0:
+        decision = "ROCK"
+    elif beans_count > 0:
+        decision = "BEAN"
+    else:
+        decision = "NONE"
 
-    print("Inference + Flip Mode")
-    print("b: Capture Background | q: Quit")
+    return beans_count, rocks_count, decision
 
+# =========================
+# Hardware stubs (replace later)
+# =========================
+def feeder_pulse(ms: int):
+    # TODO: your 12V + 5V feeder steppers here
+    print(f"[ACT] FEED pulse {ms} ms")
+
+def steppers_disable_all():
+    # TODO: EN disable for feeder1 + feeder2 + flip plane drivers
+    print("[ACT] STEPPERS DISABLE (quiet window)")
+
+def steppers_enable_all():
+    # TODO: EN enable for drivers
+    print("[ACT] STEPPERS ENABLE")
+
+def flip_plane_move(decision: str):
+    # TODO: move flip plane 5V stepper to the bin based on decision
+    print(f"[ACT] FLIP plane for decision={decision}")
+
+def read_weight_g() -> float:
+    # TODO: HX711 / scale read
+    return 0.0
+
+def arm_pick():
+    # TODO: PCA9685 servo sequence
+    print("[ACT] ARM_PICK")
+
+def arm_deliver():
+    print("[ACT] DELIVER")
+
+def user_start() -> bool:
+    # TODO: button/UI
+    return True
+
+# =========================
+# FSM System
+# =========================
+class CoffeeSystemFSM:
+    def __init__(self):
+        self.state = State.IDLE
+        self.state_t0 = time.time()
+
+        # timing / tuning
+        self.feed_pulse_ms = 250
+        self.settle_s = 0.6
+        self.led_warmup_s = 0.15
+
+        # decision memory
+        self.beans = 0
+        self.rocks = 0
+        self.decision = "NONE"
+
+        # init LED
+        leds_init_once()
+        leds_off()
+
+        # load model
+        self.model = load_model(MODEL_FILE)
+        if self.model is None:
+            raise RuntimeError("Model not loaded.")
+
+        # init camera
+        self.picam2 = Picamera2()
+        config = self.picam2.create_preview_configuration(
+            main={"format": "RGB888", "size": (FRAME_W, FRAME_H)}
+        )
+        self.picam2.configure(config)
+        self.picam2.start()
+        time.sleep(1.5)
+        try:
+            self.picam2.set_controls({"AeEnable": False, "AwbEnable": False})
+        except Exception:
+            pass
+
+        # ROI + background
+        self.roi_rect = clamp_roi(ROI_X, ROI_Y, ROI_W, ROI_H, FRAME_W, FRAME_H)
+
+        # Capture background once at startup (IMPORTANT: ROI should be empty)
+        print("[CV] Capturing background (ensure ROI is empty)...")
+        leds_white_on()
+        time.sleep(self.led_warmup_s)
+        self.bg_gray = capture_background_gray(self.picam2, self.roi_rect, n=20)
+        print("[CV] Background captured.")
+        leds_off()
+
+    def enter(self, new_state: State):
+        self.state = new_state
+        self.state_t0 = time.time()
+        print(f"[FSM] -> {new_state.name}")
+
+    def elapsed(self) -> float:
+        return time.time() - self.state_t0
+
+    def shutdown(self):
+        try:
+            leds_off()
+        except Exception:
+            pass
+        try:
+            self.picam2.stop()
+        except Exception:
+            pass
+
+    def tick(self):
+        try:
+            if self.state == State.IDLE:
+                if user_start():
+                    self.enter(State.FEED_PULSE)
+
+            elif self.state == State.FEED_PULSE:
+                steppers_enable_all()
+                feeder_pulse(self.feed_pulse_ms)
+                self.enter(State.STEPPERS_OFF)
+
+            elif self.state == State.STEPPERS_OFF:
+                # MUST disable motors before vision
+                steppers_disable_all()
+                self.enter(State.SETTLE)
+
+            elif self.state == State.SETTLE:
+                # Wait vibration decay
+                if self.elapsed() >= self.settle_s:
+                    self.enter(State.LIGHT_ON)
+
+            elif self.state == State.LIGHT_ON:
+                # ===== LIGHT_ON + CAPTURE + DETECT (your request) =====
+                leds_white_on()
+                if self.elapsed() < self.led_warmup_s:
+                    return  # keep waiting in LIGHT_ON
+
+                self.beans, self.rocks, self.decision = detect_once(
+                    self.picam2, self.model, self.roi_rect, self.bg_gray
+                )
+                print(f"[CV] beans={self.beans} rocks={self.rocks} => decision={self.decision}")
+
+                leds_off()
+                self.enter(State.SORT)
+
+            elif self.state == State.SORT:
+                # Sorting may vibrate -> do it AFTER detection
+                steppers_enable_all()
+                flip_plane_move(self.decision)
+                self.enter(State.WEIGH_CHECK)
+
+            elif self.state == State.WEIGH_CHECK:
+                w = read_weight_g()
+                print(f"[SCALE] {w:.2f} g")
+
+                # TODO: replace with your real logic:
+                # if w < target -> FEED_PULSE else -> ARM_PICK
+                self.enter(State.ARM_PICK)
+
+            elif self.state == State.ARM_PICK:
+                steppers_disable_all()
+                arm_pick()
+                self.enter(State.DELIVER)
+
+            elif self.state == State.DELIVER:
+                arm_deliver()
+                self.enter(State.DONE)
+
+            elif self.state == State.DONE:
+                print("[FSM] DONE -> IDLE")
+                self.enter(State.IDLE)
+
+            elif self.state == State.ERROR:
+                steppers_disable_all()
+                leds_off()
+                time.sleep(0.5)
+
+        except Exception as e:
+            print("[FSM] Exception:", e)
+            self.enter(State.ERROR)
+
+def main():
+    fsm = CoffeeSystemFSM()
     try:
         while True:
-            frame_rgb = picam2.capture_array()
-            full_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-
-            cv2.rectangle(full_bgr, (rx, ry), (rx + rw, ry + rh), (0, 255, 255), 2)
-            roi_bgr = full_bgr[ry:ry + rh, rx:rx + rw]
-            vis_roi = roi_bgr.copy()
-
-            beans_count = 0
-            rocks_count = 0
-            mask_area = 0
-
-            if bg_gray is None:
-                cv2.putText(full_bgr, "Press 'b' for BACKGROUND (empty ROI)",
-                            (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-            else:
-                # Mask + contours
-                mask = get_object_mask(roi_bgr, bg_gray)
-                mask_area = int(cv2.countNonZero(mask))
-                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-                feature_list = []
-                coords = []
-
-                for cnt in contours:
-                    a = cv2.contourArea(cnt)
-                    if a < MIN_AREA or a > MAX_AREA:
-                        continue
-                    vec = get_features_vector(cnt)
-                    if vec:
-                        feature_list.append(vec)
-                        coords.append(cv2.boundingRect(cnt))
-
-                # Predict
-                if feature_list:
-                    preds = model.predict(feature_list)
-                    for i, label in enumerate(preds):
-                        x, y, w, h = coords[i]
-                        if label == 1:
-                            beans_count += 1
-                            color = (0, 255, 0)
-                            text = "BEAN"
-                        else:
-                            rocks_count += 1
-                            color = (0, 0, 255)
-                            text = "ROCK"
-                        cv2.rectangle(vis_roi, (x, y), (x + w, y + h), color, 2)
-                        cv2.putText(vis_roi, text, (x, y - 6),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-                header = f"Beans: {beans_count} | Rocks: {rocks_count}"
-                cv2.putText(full_bgr, header, (20, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-
-                # ===== Mini-FSM: detect -> stable -> decide -> flip -> return -> wait clear =====
-                if state == "WAIT_OBJECT":
-                    stable_cnt = 0
-                    last_label = None
-                    beans_max = 0
-                    rocks_max = 0
-                    if mask_area > PRESENT_THRESH:
-                        state = "CLASSIFY"
-
-                elif state == "CLASSIFY":
-                    if mask_area > PRESENT_THRESH:
-                        stable_cnt += 1
-
-                        # Accumulate max seen during stable window
-                        if beans_count > beans_max:
-                            beans_max = beans_count
-                        if rocks_count > rocks_max:
-                            rocks_max = rocks_count
-                    else:
-                        stable_cnt = 0
-                        beans_max = 0
-                        rocks_max = 0
-                        state = "WAIT_OBJECT"
-
-                    if stable_cnt >= STABLE_FRAMES:
-                        time.sleep(SETTLE_SEC)
-
-                        # RULE YOU WANT:
-                        # If any rock appeared at any time in stable window -> ROCK side
-                        # else if any bean appeared -> BEAN side
-                        if rocks_max > 0:
-                            last_label = "ROCK"
-                            state = "FLIP"
-                        elif beans_max > 0:
-                            last_label = "BEAN"
-                            state = "FLIP"
-                        else:
-                            # Object present but never produced valid contours
-                            stable_cnt = 0
-                            beans_max = 0
-                            rocks_max = 0
-
-                elif state == "FLIP":
-                    # Move to target side
-                    if last_label == "BEAN":
-                        print("Flip RIGHT (BEAN)")
-                        flip_pos = move_to(stepper, POS_RIGHT, flip_pos)
-                    else:
-                        print("Flip LEFT (ROCK)")
-                        flip_pos = move_to(stepper, POS_LEFT, flip_pos)
-
-                    # Wait for drop
-                    time.sleep(DROP_WAIT_SEC)
-
-                    # Return to center every time
-                    flip_pos = move_to(stepper, 0, flip_pos)
-
-                    # Release after returning (optional)
-                    stepper.release()
-
-                    state = "WAIT_CLEAR"
-
-                elif state == "WAIT_CLEAR":
-                    if mask_area < CLEAR_THRESH:
-                        state = "WAIT_OBJECT"
-
-                # Debug overlay (user-edited line)
-                cv2.putText(full_bgr, f"State:{state} mask={mask_area} stable={stable_cnt} bMax={beans_max} rMax={rocks_max}",
-                            (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
-
-                cv2.imshow("Mask", mask)
-
-            cv2.imshow("Review", full_bgr)
-            cv2.imshow("Inference", vis_roi)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
-            elif key == ord('b'):
-                print("Capturing background (make sure ROI is empty)...")
-                bg_gray = capture_background_gray(picam2, roi_rect)
-                print("Background captured.")
-                state = "WAIT_OBJECT"
-                stable_cnt = 0
-                last_label = None
-                beans_max = 0
-                rocks_max = 0
-
+            fsm.tick()
+            time.sleep(0.02)
+    except KeyboardInterrupt:
+        print("\nStopping...")
     finally:
-        try:
-            picam2.stop()
-        except:
-            pass
-        cv2.destroyAllWindows()
-        stepper.cleanup()
+        fsm.shutdown()
 
 if __name__ == "__main__":
     main()
