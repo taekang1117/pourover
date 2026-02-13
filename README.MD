@@ -8,5 +8,10 @@ DIR is GPIO \
 STEP is GPIO \
 VIO is 3.3V \ 
 VIN is 12V \
-2 GNDS \
+2 GNDS 
+
+# Week 16 
+Base flipping code: \
+Slow Feeder code: \
+LED Turn off code for the main function
 
