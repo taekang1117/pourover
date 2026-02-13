@@ -40,6 +40,15 @@ def set_max_white():
         strip.setPixelColor(i, white)
     strip.show()
 
+
+def leds_off():
+    # Ensure the strip is initialized, then turn everything off
+    strip.begin()
+    off = Color(0, 0, 0)
+    for i in range(LED_COUNT):
+        strip.setPixelColor(i, off)
+    strip.show()
+
 # =========================
 # ULN2003 Stepper Setup (28BYJ-48 5V)
 # =========================
@@ -361,6 +370,7 @@ def main():
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
+                leds_off()
                 break
             elif key == ord('b'):
                 print("Capturing background (make sure ROI is empty)...")
@@ -374,9 +384,14 @@ def main():
 
     finally:
         try:
-            picam2.stop()
+            leds_off()
         except:
             pass
+        
+        try:
+            picam2.stop()
+        except:
+            pass 
         cv2.destroyAllWindows()
         stepper.cleanup()
 
