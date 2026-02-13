@@ -148,4 +148,66 @@ def main():
     print("  k: jog Motor 2 forward (hold)")
     print("  m: jog Motor 2 reverse (hold)")
     print("  p: pause/resume (pauses stepping loops)")
-    print("  q: qu
+    print("  q: quit\n")
+    print(f"DOSE_STEPS={DOSE_STEPS}, STEP_GAP_US={STEP_GAP_US} (~{1_000_000/STEP_GAP_US:.0f} steps/s)\n")
+
+    with RawTerminal():
+        try:
+            # For "hold to jog" behavior we do short bursts repeatedly while key is held.
+            while True:
+                ch = getch_nonblocking()
+                if ch is None:
+                    time.sleep(0.01)
+                    continue
+
+                if ch == 'q':
+                    stop["flag"] = True
+                    break
+
+                if ch == 'p':
+                    paused["flag"] = not paused["flag"]
+                    print("[PAUSE]" if paused["flag"] else "[RESUME]")
+
+                elif ch == '1':
+                    print("[M1] dose")
+                    m1.set_dir(True)
+                    m1.step_n(DOSE_STEPS, stop_flag=stop_flag, paused_flag=paused_flag)
+                    time.sleep(SETTLE_SEC)
+
+                elif ch == '2':
+                    print("[M2] dose")
+                    m2.set_dir(True)
+                    m2.step_n(DOSE_STEPS, stop_flag=stop_flag, paused_flag=paused_flag)
+                    time.sleep(SETTLE_SEC)
+
+                elif ch in ('a', 'z', 'k', 'm'):
+                    # Jog in small chunks while key repeats
+                    if ch == 'a':
+                        motor, forward = m1, True
+                        label = "M1 forward"
+                    elif ch == 'z':
+                        motor, forward = m1, False
+                        label = "M1 reverse"
+                    elif ch == 'k':
+                        motor, forward = m2, True
+                        label = "M2 forward"
+                    else:
+                        motor, forward = m2, False
+                        label = "M2 reverse"
+
+                    print(f"[JOG] {label} (tap repeatedly to continue)")
+                    motor.set_dir(forward)
+                    # One jog chunk:
+                    motor.step_n(200, stop_flag=stop_flag, paused_flag=paused_flag)
+
+                # Ignore other keys
+
+        finally:
+            # Disable both drivers on exit
+            GPIO.output(M1_EN, GPIO.HIGH)
+            GPIO.output(M2_EN, GPIO.HIGH)
+            GPIO.cleanup()
+            print("\nClean exit. Drivers disabled.")
+
+if __name__ == "__main__":
+    main()
