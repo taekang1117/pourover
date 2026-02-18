@@ -1,6 +1,6 @@
 # collect_data.py
 # Run: sudo python3 collect_data.py
-
+import sys
 import time
 import cv2
 import numpy as np
@@ -8,6 +8,15 @@ import pandas as pd
 from picamera2 import Picamera2
 from rpi_ws281x import PixelStrip, Color
 import os
+
+# Flipper (Stepper)
+from flipper import (
+    ULN2003Stepper,
+    FLIP_IN1, FLIP_IN2, FLIP_IN3, FLIP_IN4,
+    STEPS_135_DEG,
+    RETURN_WAIT_SEC,
+    FLIP_STEP_DELAY
+)
 
 # =========================
 # WS2812 / NeoPixel Setup
@@ -20,7 +29,20 @@ LED_INVERT = False
 LED_BRIGHTNESS = 255
 LED_CHANNEL = 0
 
-strip = PixelStrip(LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA, LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL)
+FLIP_IN1 = 5
+FLIP_IN2 = 6
+FLIP_IN3 = 13
+FLIP_IN4 = 19
+
+FLIP_STEP_DELAY = 0.0018
+
+
+
+
+strip = PixelStrip(
+    LED_COUNT, LED_PIN, LED_FREQ_HZ, LED_DMA,
+    LED_INVERT, LED_BRIGHTNESS, LED_CHANNEL
+)
 
 def set_max_white():
     strip.begin()
@@ -33,7 +55,7 @@ def set_max_white():
 # Configuration
 # =========================
 FRAME_W, FRAME_H = 960, 540
-ROI_X, ROI_Y, ROI_W, ROI_H = 260, 90, 440, 360 # Default ROI
+ROI_X, ROI_Y, ROI_W, ROI_H = 272, 44, 418, 417  # your padded ROI
 
 # Image Processing Tunables
 BLUR_K = 5
@@ -83,28 +105,18 @@ def get_object_mask(roi_bgr, bg_gray):
     return mask
 
 def get_features(cnt):
-    # Calculate features requested: [area, aspect_ratio, circularity, solidity, perimeter]
-    
     area = float(cv2.contourArea(cnt))
     perim = float(cv2.arcLength(cnt, True))
-    
     if perim == 0:
         return None
 
     circularity = (4.0 * np.pi * area) / (perim * perim)
-    
+
     hull = cv2.convexHull(cnt)
     hull_area = float(cv2.contourArea(hull))
     solidity = area / hull_area if hull_area > 0 else 0
-    
+
     x, y, w, h = cv2.boundingRect(cnt)
-    aspect_ratio = float(w) / h if h > 0 else 0
-    
-    # We might want "elongation" or typical aspect ratio defined as max dim / min dim
-    # but w/h is standard aspect ratio. Let's stick to max/min to be rotation invariant-ish for simple boxes
-    # or just w/h. The user asked for "aspect_ratio".
-    # Standard engineering aspect ratio often is max_dim / min_dim for shapes.
-    # Let's use max(w,h)/min(w,h) to match main1.py logic which is more robust for rotation
     aspect_ratio_invariant = float(max(w, h)) / (min(w, h) + 1e-9)
 
     return {
@@ -115,6 +127,16 @@ def get_features(cnt):
         "perimeter": perim
     }
 
+def empty_plate(flipper):
+    """
+    Flip forward ~135 deg then return.
+    This will block for the duration of the flip (expected).
+    """
+    flipper.step(STEPS_135_DEG, direction=+1)
+    time.sleep(RETURN_WAIT_SEC)
+    flipper.step(STEPS_135_DEG, direction=-1)
+    flipper.release()
+
 # =========================
 # Main
 # =========================
@@ -122,14 +144,22 @@ def main():
     roi_rect = clamp_roi(ROI_X, ROI_Y, ROI_W, ROI_H, FRAME_W, FRAME_H)
     rx, ry, rw, rh = roi_rect
 
+    # Init flipper (stepper)
+    flipper = ULN2003Stepper(
+        FLIP_IN1, FLIP_IN2, FLIP_IN3, FLIP_IN4,
+        step_delay=FLIP_STEP_DELAY
+    )
+
     picam2 = Picamera2()
     set_max_white()
-    
-    config = picam2.create_preview_configuration(main={"format": "RGB888", "size": (FRAME_W, FRAME_H)})
+
+    config = picam2.create_preview_configuration(
+        main={"format": "RGB888", "size": (FRAME_W, FRAME_H)}
+    )
     picam2.configure(config)
     picam2.start()
 
-    time.sleep(1.5) # Warmup
+    time.sleep(1.5)  # Warmup
     try:
         picam2.set_controls({"AeEnable": False, "AwbEnable": False})
     except:
@@ -137,96 +167,131 @@ def main():
 
     bg_gray = None
     samples_collected = []
-    
-    print("="*60)
+
+    print("=" * 60)
     print("DATA COLLECTION MODE")
     print("1. Clear plate, press 'b' to capture BACKGROUND.")
     print("2. Place BEANS, press '1' to collect BEAN samples.")
     print("3. Place ROCKS, press '2' to collect ROCK samples.")
-    print("4. Press 's' to SAVE to CSV.")
-    print("5. Press 'q' to QUIT.")
-    print("="*60)
+    print("4. Press 'e' to EMPTY (flip/clear plate).")
+    print("5. Press 's' to SAVE to CSV.")
+    print("6. Press 'q' to QUIT.")
+    print("=" * 60)
 
-    while True:
-        frame_rgb = picam2.capture_array()
-        full_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-        
-        # Draw ROI
-        cv2.rectangle(full_bgr, (rx, ry), (rx + rw, ry + rh), (0, 255, 255), 2)
-        roi_bgr = full_bgr[ry:ry + rh, rx:rx + rw]
-        vis_roi = roi_bgr.copy()
+    try:
+        while True:
+            frame_rgb = picam2.capture_array()
+            full_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
-        if bg_gray is None:
-            cv2.putText(full_bgr, "Press 'b' for BACKGROUND", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        else:
-            mask = get_object_mask(roi_bgr, bg_gray)
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            count_visible = 0
-            for cnt in contours:
-                if cv2.contourArea(cnt) < MIN_AREA or cv2.contourArea(cnt) > MAX_AREA:
-                    continue
-                
-                count_visible += 1
-                x, y, w, h = cv2.boundingRect(cnt)
-                cv2.rectangle(vis_roi, (x, y), (x+w, y+h), (0, 255, 0), 2)
-            
-            cv2.putText(full_bgr, f"Visible Objects: {count_visible}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            cv2.putText(full_bgr, f"Collected Total: {len(samples_collected)}", (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
-            cv2.imshow("Mask", mask)
+            # Draw ROI
+            cv2.rectangle(full_bgr, (rx, ry), (rx + rw, ry + rh), (0, 255, 255), 2)
+            roi_bgr = full_bgr[ry:ry + rh, rx:rx + rw]
+            vis_roi = roi_bgr.copy()
 
-        cv2.imshow("Data Collector", full_bgr)
-        cv2.imshow("ROI", vis_roi)
+            # Always define contours so key handlers are safe
+            contours = []
 
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == ord('q'):
-            break
-        elif key == ord('b'):
-            print("Capturing background...")
-            bg_gray = capture_background_gray(picam2, roi_rect)
-            print("Background captured.")
-        
-        elif key == ord('1'): # BEAN
             if bg_gray is None:
-                print("!! Capture background first (b) !!")
-                continue
-            
-            added = 0
-            for cnt in contours:
-                if cv2.contourArea(cnt) < MIN_AREA: continue
-                feats = get_features(cnt)
-                if feats:
-                    feats['label'] = 1 # BEAN
-                    samples_collected.append(feats)
-                    added += 1
-            print(f"Added {added} BEAN samples.")
-
-        elif key == ord('2'): # ROCK
-            if bg_gray is None:
-                print("!! Capture background first (b) !!")
-                continue
-            
-            added = 0
-            for cnt in contours:
-                if cv2.contourArea(cnt) < MIN_AREA: continue
-                feats = get_features(cnt)
-                if feats:
-                    feats['label'] = 0 # ROCK
-                    samples_collected.append(feats)
-                    added += 1
-            print(f"Added {added} ROCK samples.")
-
-        elif key == ord('s'):
-            if len(samples_collected) > 0:
-                df = pd.DataFrame(samples_collected)
-                df.to_csv(DATA_FILE, index=False)
-                print(f"Saved {len(df)} samples to {DATA_FILE}")
+                cv2.putText(
+                    full_bgr, "Press 'b' for BACKGROUND", (20, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2
+                )
             else:
-                print("No data to save!")
+                mask = get_object_mask(roi_bgr, bg_gray)
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    picam2.stop()
-    cv2.destroyAllWindows()
+                count_visible = 0
+                for cnt in contours:
+                    a = cv2.contourArea(cnt)
+                    if a < MIN_AREA or a > MAX_AREA:
+                        continue
+                    count_visible += 1
+                    x, y, w, h = cv2.boundingRect(cnt)
+                    cv2.rectangle(vis_roi, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+                cv2.putText(
+                    full_bgr, f"Visible Objects: {count_visible}", (20, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2
+                )
+                cv2.putText(
+                    full_bgr, f"Collected Total: {len(samples_collected)}", (20, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2
+                )
+                cv2.imshow("Mask", mask)
+
+            cv2.imshow("Data Collector", full_bgr)
+            cv2.imshow("ROI", vis_roi)
+
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord('q'):
+                break
+
+            elif key == ord('b'):
+                print("Capturing background...")
+                bg_gray = capture_background_gray(picam2, roi_rect)
+                print("Background captured.")
+
+            elif key == ord('e'):
+                print("Emptying plate (flip)...")
+                empty_plate(flipper)
+                print("Done.")
+
+            elif key == ord('1'):  # BEAN
+                if bg_gray is None:
+                    print("!! Capture background first (b) !!")
+                    continue
+
+                added = 0
+                for cnt in contours:
+                    a = cv2.contourArea(cnt)
+                    if a < MIN_AREA or a > MAX_AREA:
+                        continue
+                    feats = get_features(cnt)
+                    if feats:
+                        feats["label"] = 1  # BEAN
+                        samples_collected.append(feats)
+                        added += 1
+                print(f"Added {added} BEAN samples.")
+
+            elif key == ord('2'):  # ROCK
+                if bg_gray is None:
+                    print("!! Capture background first (b) !!")
+                    continue
+
+                added = 0
+                for cnt in contours:
+                    a = cv2.contourArea(cnt)
+                    if a < MIN_AREA or a > MAX_AREA:
+                        continue
+                    feats = get_features(cnt)
+                    if feats:
+                        feats["label"] = 0  # ROCK
+                        samples_collected.append(feats)
+                        added += 1
+                print(f"Added {added} ROCK samples.")
+
+            elif key == ord('s'):
+                if len(samples_collected) > 0:
+                    df = pd.DataFrame(samples_collected)
+                    df.to_csv(DATA_FILE, index=False)
+                    print(f"Saved {len(df)} samples to {DATA_FILE}")
+                else:
+                    print("No data to save!")
+
+    finally:
+        # Clean shutdown no matter what
+        try:
+            picam2.stop()
+        except:
+            pass
+        cv2.destroyAllWindows()
+
+        try:
+            flipper.release()
+            flipper.cleanup()
+        except:
+            pass
 
 if __name__ == "__main__":
     main()
