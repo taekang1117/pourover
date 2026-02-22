@@ -30,6 +30,12 @@ def set_max_white():
         strip.setPixelColor(i, white)
     strip.show()
 
+def set_led_off():
+    off = Color(0, 0, 0)
+    for i in range(LED_COUNT):
+        strip.setPixelColor(i, off)
+    strip.show()
+
 # =========================
 # Configuration
 # =========================
@@ -278,6 +284,7 @@ def main():
             key = cv2.waitKey(1) & 0xFF
 
             if key == ord('q'):
+                set_led_off()
                 break
             elif key == ord('b'):
                 print("Capturing background...")
