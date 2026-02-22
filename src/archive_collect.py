@@ -339,9 +339,23 @@ def main():
 
             elif key == ord('s'):
                 if len(samples_collected) > 0:
-                    df = pd.DataFrame(samples_collected)
-                    df.to_csv(DATA_FILE, index=False)
-                    print(f"Saved {len(df)} samples to {DATA_FILE}")
+                    new_df = pd.DataFrame(samples_collected)
+                    if os.path.exists(DATA_FILE):
+                        try:
+                            existing_df = pd.read_csv(DATA_FILE)
+                            merged_df = pd.concat([existing_df, new_df], ignore_index=True, sort=False)
+                            merged_df.to_csv(DATA_FILE, index=False)
+                            print(
+                                f"Merged {len(new_df)} new samples with {len(existing_df)} existing samples "
+                                f"and saved {len(merged_df)} total to {DATA_FILE}"
+                            )
+                        except Exception as exc:
+                            print(f"Could not merge with existing {DATA_FILE}: {exc}")
+                            new_df.to_csv(DATA_FILE, index=False)
+                            print(f"Saved {len(new_df)} new samples to {DATA_FILE} (overwrite fallback)")
+                    else:
+                        new_df.to_csv(DATA_FILE, index=False)
+                        print(f"Saved {len(new_df)} samples to {DATA_FILE}")
                 else:
                     print("No data to save!")
     finally:
