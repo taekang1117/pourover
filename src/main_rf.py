@@ -41,7 +41,7 @@ def set_led_off():
 # =========================
 FRAME_W, FRAME_H = 960, 540
 # ROI_X, ROI_Y, ROI_W, ROI_H = 260, 90, 440, 360
-ROI_X, ROI_Y, ROI_W, ROI_H = 272, 44, 418, 417
+ROI_X, ROI_Y, ROI_W, ROI_H = 280, 23, 431, 450
 
 BLUR_K = 5
 MORPH_K = 5
@@ -107,10 +107,16 @@ def capture_background_gray(picam2, roi_rect, n=20):
 def get_object_mask(roi_bgr, bg_gray):
     g1 = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
     g1 = cv2.GaussianBlur(g1, (BLUR_K, BLUR_K), 0)
-    diff = cv2.absdiff(g1, bg_gray)
+    # Suppress bright reflections: keep only pixels that became darker than background.
+    diff = cv2.subtract(bg_gray, g1)
     _, mask = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     mask = morph_cleanup(mask)
     return mask
+
+
+def is_valid_contour(cnt):
+    area = cv2.contourArea(cnt)
+    return MIN_AREA <= area <= MAX_AREA
 
 def get_features_vector(cnt):
     # MUST MATCH train_model.py order:
@@ -259,7 +265,7 @@ def main():
 
                 # 1. Collect features for batch prediction (faster than one by one, though for <50 objs it matters little)
                 for cnt in contours:
-                    if cv2.contourArea(cnt) < MIN_AREA or cv2.contourArea(cnt) > MAX_AREA:
+                    if not is_valid_contour(cnt):
                         continue
                     
                     vec = get_features_vector(cnt)
