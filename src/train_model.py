@@ -8,6 +8,24 @@ from sklearn.metrics import classification_report, confusion_matrix
 
 DATA_FILE = "training_data.csv"
 MODEL_FILE = "bean_model.pkl"
+FEATURE_COLS = [
+    "area",
+    "aspect_ratio",
+    "circularity",
+    "solidity",
+    "perimeter",
+    "mean_hue",
+    "mean_saturation",
+    "gabor_mean",
+    "gabor_std",
+    "hu1",
+    "hu2",
+    "hu3",
+    "hu4",
+    "hu5",
+    "hu6",
+    "hu7",
+]
 
 def main():
     print(f"Loading data from {DATA_FILE}...")
@@ -22,22 +40,37 @@ def main():
         print("Dataset is empty.")
         return
         
-    required_cols = ['area', 'aspect_ratio', 'circularity', 'solidity', 'perimeter', 'label']
+    required_cols = FEATURE_COLS + ["label"]
     if not all(col in df.columns for col in required_cols):
         print(f"Error: Dataset missing columns. Required: {required_cols}")
         print(f"Found: {df.columns}")
         return
 
+    # Coerce numeric columns and handle mixed old/new rows after CSV merges.
+    df[FEATURE_COLS] = df[FEATURE_COLS].apply(pd.to_numeric, errors="coerce")
+    df["label"] = pd.to_numeric(df["label"], errors="coerce")
+    df = df.dropna(subset=["label"])
+    df["label"] = df["label"].astype(int)
+
+    # Fill any missing feature values with column medians (or 0.0 as fallback).
+    for col in FEATURE_COLS:
+        median = df[col].median()
+        if pd.isna(median):
+            median = 0.0
+        df[col] = df[col].fillna(median)
+
     # Features and Label
-    X = df[['area', 'aspect_ratio', 'circularity', 'solidity', 'perimeter']]
-    y = df['label']
+    X = df[FEATURE_COLS]
+    y = df["label"]
 
     print(f"Total samples: {len(df)}")
     print(f"Class distribution:\n{y.value_counts()}")
 
     # Split (optional if dataset is small, but good practice)
     # If dataset is very small, we might just train on all, but let's do a split for validation
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
     
     # Train
     print("Training RandomForestClassifier...")

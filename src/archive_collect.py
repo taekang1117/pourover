@@ -58,6 +58,9 @@ MAX_AREA = 8000
 # File to save data
 DATA_FILE = "training_data.csv"
 
+# Texture kernel (reused for every contour).
+GABOR_KERNEL = cv2.getGaborKernel((9, 9), 3.0, np.pi / 4, 8.0, 0.5, 0, ktype=cv2.CV_32F)
+
 # =========================
 # ULN2003 Stepper Setup (28BYJ-48 5V)
 # =========================
@@ -170,8 +173,8 @@ def get_object_mask(roi_bgr, bg_gray):
     mask = morph_cleanup(mask)
     return mask
 
-def get_features(cnt):
-    # Calculate features requested: [area, aspect_ratio, circularity, solidity, perimeter]
+def get_features(cnt, roi_bgr):
+    # Base geometric features.
     
     area = float(cv2.contourArea(cnt))
     perim = float(cv2.arcLength(cnt, True))
@@ -186,21 +189,45 @@ def get_features(cnt):
     solidity = area / hull_area if hull_area > 0 else 0
     
     x, y, w, h = cv2.boundingRect(cnt)
-    aspect_ratio = float(w) / h if h > 0 else 0
-    
-    # We might want "elongation" or typical aspect ratio defined as max dim / min dim
-    # but w/h is standard aspect ratio. Let's stick to max/min to be rotation invariant-ish for simple boxes
-    # or just w/h. The user asked for "aspect_ratio".
-    # Standard engineering aspect ratio often is max_dim / min_dim for shapes.
-    # Let's use max(w,h)/min(w,h) to match main1.py logic which is more robust for rotation
     aspect_ratio_invariant = float(max(w, h)) / (min(w, h) + 1e-9)
+
+    # Create per-object mask inside ROI for color/texture statistics.
+    obj_mask = np.zeros(roi_bgr.shape[:2], dtype=np.uint8)
+    cv2.drawContours(obj_mask, [cnt], -1, 255, thickness=-1)
+
+    # Color analysis: mean Hue and Saturation (HSV space).
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    mean_h, mean_s, _ = cv2.mean(hsv, mask=obj_mask)[:3]
+
+    # Texture analysis: masked Gabor response statistics.
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+    gabor_resp = cv2.filter2D(gray, cv2.CV_32F, GABOR_KERNEL)
+    gabor_abs = np.abs(gabor_resp)
+    gabor_mean, gabor_std = cv2.meanStdDev(gabor_abs, mask=obj_mask)
+    gabor_mean = float(gabor_mean[0][0])
+    gabor_std = float(gabor_std[0][0])
+
+    # Hu moments: log-scaled for numerical stability and dynamic-range compression.
+    hu = cv2.HuMoments(cv2.moments(cnt)).flatten()
+    hu_log = [float(-np.sign(v) * np.log10(abs(v) + 1e-12)) for v in hu]
 
     return {
         "area": area,
         "aspect_ratio": aspect_ratio_invariant,
         "circularity": circularity,
         "solidity": solidity,
-        "perimeter": perim
+        "perimeter": perim,
+        "mean_hue": float(mean_h),
+        "mean_saturation": float(mean_s),
+        "gabor_mean": gabor_mean,
+        "gabor_std": gabor_std,
+        "hu1": hu_log[0],
+        "hu2": hu_log[1],
+        "hu3": hu_log[2],
+        "hu4": hu_log[3],
+        "hu5": hu_log[4],
+        "hu6": hu_log[5],
+        "hu7": hu_log[6],
     }
 
 # =========================
@@ -314,7 +341,7 @@ def main():
                 for cnt in contours:
                     if cv2.contourArea(cnt) < MIN_AREA:
                         continue
-                    feats = get_features(cnt)
+                    feats = get_features(cnt, roi_bgr)
                     if feats:
                         feats['label'] = 1 # BEAN
                         samples_collected.append(feats)
@@ -330,7 +357,7 @@ def main():
                 for cnt in contours:
                     if cv2.contourArea(cnt) < MIN_AREA:
                         continue
-                    feats = get_features(cnt)
+                    feats = get_features(cnt, roi_bgr)
                     if feats:
                         feats['label'] = 0 # ROCK
                         samples_collected.append(feats)
