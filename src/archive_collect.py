@@ -44,7 +44,7 @@ MORPH_K = 5
 OPEN_ITERS = 2
 CLOSE_ITERS = 2
 MIN_AREA = 800
-MAX_AREA = 15000
+MAX_AREA = 40000
 
 # File to save data
 DATA_FILE = "training_data.csv"
@@ -156,16 +156,10 @@ def capture_background_gray(picam2, roi_rect, n=20):
 def get_object_mask(roi_bgr, bg_gray):
     g1 = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
     g1 = cv2.GaussianBlur(g1, (BLUR_K, BLUR_K), 0)
-    # Suppress bright reflections: keep only pixels that became darker than background.
-    diff = cv2.subtract(bg_gray, g1)
+    diff = cv2.absdiff(g1, bg_gray)
     _, mask = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     mask = morph_cleanup(mask)
     return mask
-
-
-def is_valid_contour(cnt):
-    area = cv2.contourArea(cnt)
-    return MIN_AREA <= area <= MAX_AREA
 
 def get_features(cnt):
     # Calculate features requested: [area, aspect_ratio, circularity, solidity, perimeter]
@@ -264,7 +258,7 @@ def main():
 
                 count_visible = 0
                 for cnt in contours:
-                    if not is_valid_contour(cnt):
+                    if cv2.contourArea(cnt) < MIN_AREA or cv2.contourArea(cnt) > MAX_AREA:
                         continue
 
                     count_visible += 1
@@ -308,7 +302,7 @@ def main():
 
                 added = 0
                 for cnt in contours:
-                    if not is_valid_contour(cnt):
+                    if cv2.contourArea(cnt) < MIN_AREA:
                         continue
                     feats = get_features(cnt)
                     if feats:
@@ -324,7 +318,7 @@ def main():
 
                 added = 0
                 for cnt in contours:
-                    if not is_valid_contour(cnt):
+                    if cv2.contourArea(cnt) < MIN_AREA:
                         continue
                     feats = get_features(cnt)
                     if feats:

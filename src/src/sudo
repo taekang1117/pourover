@@ -1,3 +1,0 @@
-sudo apt update
-sudo apt install -y python3-pip
-sudo pip3 install rpi_ws281x
