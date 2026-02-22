@@ -36,7 +36,7 @@ def set_max_white():
 FRAME_W, FRAME_H = 960, 540
 # === DONT CHANGE ==== 
 
-ROI_X, ROI_Y, ROI_W, ROI_H = 280, 23, 431, 450 # From provided corner points (axis-aligned bounds)
+ROI_X, ROI_Y, ROI_W, ROI_H = 272, 44, 418, 417 # From provided corner points (axis-aligned bounds)
 
 # Image Processing Tunables
 BLUR_K = 5
