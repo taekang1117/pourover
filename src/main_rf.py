@@ -142,7 +142,10 @@ def get_object_mask(roi_bgr, bg_gray):
     g1 = cv2.GaussianBlur(g1, (BLUR_K, BLUR_K), 0)
     # Suppress bright reflections: keep only pixels that became darker than background.
     diff = cv2.subtract(bg_gray, g1)
-    _, mask = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    otsu_t, _ = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    min_diff_t = 12
+    final_t = max(min_diff_t, int(otsu_t))
+    _, mask = cv2.threshold(diff, final_t, 255, cv2.THRESH_BINARY)
     mask = morph_cleanup(mask)
     return mask
 
