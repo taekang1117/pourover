@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>RF System Dashboard (All Data)</title>
+  <style>
+    :root{
+      --bg:#0b0f17; --panel:#111827; --panel2:#0f172a;
+      --text:#e5e7eb; --muted:#9ca3af; --good:#22c55e;
+      --warn:#f59e0b; --bad:#ef4444; --border:#1f2937;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+    }
+    *{box-sizing:border-box;}
+    body{
+      margin:0; font-family:var(--sans); color:var(--text);
+      background: radial-gradient(1200px 700px at 30% 10%, #0b1220 0%, var(--bg) 60%);
+    }
+    header{
+      padding:14px 18px; border-bottom:1px solid var(--border);
+      background: rgba(17,24,39,0.8); backdrop-filter: blur(8px);
+      position:sticky; top:0; z-index:10;
+    }
+    .title{display:flex; align-items:center; gap:10px; justify-content:space-between; flex-wrap:wrap;}
+    .title h1{margin:0; font-size:18px; font-weight:800;}
+    .controls{display:flex; gap:10px; align-items:center; flex-wrap:wrap;}
+    button{
+      border:1px solid var(--border); background:#0b1220; color:var(--text);
+      padding:9px 12px; border-radius:10px; cursor:pointer; font-weight:700;
+    }
+    button:hover{border-color:#334155;}
+    button:active{transform: translateY(1px);}
+    input, select{
+      border:1px solid var(--border); background:#0b1220; color:var(--text);
+      padding:9px 10px; border-radius:10px; font-family:var(--mono); font-size:13px; width:120px;
+    }
+    label{color:var(--muted); font-size:12px;}
+    main{padding:16px 18px;}
+    .grid{display:grid; gap:14px;}
+    .cards{grid-template-columns: repeat(12, 1fr);}
+    .card{
+      background: rgba(17,24,39,0.85); border:1px solid var(--border);
+      border-radius:14px; padding:12px;
+    }
+    .card h3{
+      margin:0 0 6px 0; font-size:12px; color:var(--muted);
+      font-weight:800; letter-spacing:0.3px; text-transform:uppercase;
+    }
+    .big{font-size:20px; font-weight:900;}
+    .mono{font-family:var(--mono);}
+    .pill{
+      display:inline-flex; align-items:center; gap:6px; padding:4px 10px;
+      border-radius:999px; border:1px solid var(--border); font-size:12px;
+      color:var(--muted); background: rgba(15,23,42,0.8); margin-left:8px;
+    }
+    .ok{color:var(--good);}
+    .warn{color:var(--warn);}
+    .bad{color:var(--bad);}
+
+    .images{grid-template-columns: repeat(12, 1fr);}
+    .imgpanel{grid-column: span 6;}
+    .imgpanel.small{grid-column: span 6;}
+    @media (min-width:1100px){
+      .imgpanel{grid-column: span 5;}
+      .imgpanel.small{grid-column: span 2;}
+    }
+    .imgwrap{
+      width:100%; border-radius:14px; overflow:hidden;
+      border:1px solid var(--border); background: rgba(15,23,42,0.75);
+    }
+    img{width:100%; height:auto; display:block;}
+    .imgcaption{
+      display:flex; justify-content:space-between; align-items:center;
+      padding:10px 12px; border-top:1px solid var(--border);
+      font-size:12px; color:var(--muted);
+    }
+
+    .panes{grid-template-columns: repeat(12, 1fr);}
+    .pane{grid-column: span 12;}
+    @media (min-width:1100px){
+      .pane.left{grid-column: span 8;}
+      .pane.right{grid-column: span 4;}
+    }
+
+    table{width:100%; border-collapse:collapse; font-size:12px; font-family:var(--mono);}
+    th, td{padding:8px 8px; border-bottom:1px solid rgba(31,41,55,0.8); vertical-align:top;}
+    th{
+      color:var(--muted); text-align:left; position:sticky; top:0;
+      background: rgba(17,24,39,0.98); z-index:1;
+    }
+    tbody tr:hover{background: rgba(15,23,42,0.65);}
+
+    .scroll{
+      max-height:440px; overflow:auto; border:1px solid var(--border);
+      border-radius:14px;
+    }
+    pre{
+      margin:0; padding:12px; font-family:var(--mono); font-size:12px;
+      color:#d1d5db; background: rgba(15,23,42,0.75);
+      border:1px solid var(--border); border-radius:14px; overflow:auto; max-height:440px;
+    }
+
+    .sectionTitle{
+      display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px;
+    }
+    .sectionTitle h2{margin:0; font-size:14px; letter-spacing:0.2px;}
+    .muted{color:var(--muted); font-size:12px;}
+    .row{display:flex; gap:10px; flex-wrap:wrap; align-items:center;}
+    .kv{display:flex; flex-direction:column; gap:4px; min-width:120px;}
+    .inlineErr{
+      margin-top:8px; color:var(--bad); font-family:var(--mono);
+      font-size:12px; white-space:pre-wrap;
+    }
+  </style>
+</head>
+
+<body>
+<header>
+  <div class="title">
+    <h1>RF System Dashboard (Full Output)</h1>
+    <div class="controls">
+      <button id="btnBg">Capture Background</button>
+      <button id="btnToggle">Pause Refresh</button>
+
+      <div class="row">
+        <div class="kv">
+          <label>Poll interval (ms)</label>
+          <input id="pollMs" type="number" value="300" min="80" step="20"/>
+        </div>
+        <div class="kv">
+          <label>Refresh JPG</label>
+          <select id="imgMode">
+            <option value="on" selected>ON</option>
+            <option value="off">OFF</option>
+          </select>
+        </div>
+      </div>
+
+      <span class="pill mono" id="lastTick">last: --</span>
+    </div>
+  </div>
+</header>
+
+<main class="grid">
+
+  <!-- Summary -->
+  <section class="grid cards">
+    <div class="card" style="grid-column: span 3;">
+      <h3>System</h3>
+      <div class="big mono" id="sysOk">--</div>
+      <div class="muted mono" id="sysMsg">message: --</div>
+    </div>
+
+    <div class="card" style="grid-column: span 3;">
+      <h3>Background</h3>
+      <div class="big mono" id="bgState">--</div>
+      <div class="muted">Note: ROI/blur changes require re-capturing background.</div>
+    </div>
+
+    <div class="card" style="grid-column: span 3;">
+      <h3>Model</h3>
+      <div class="big mono" id="modelState">--</div>
+      <div class="muted mono" id="modelErr">error: --</div>
+    </div>
+
+    <div class="card" style="grid-column: span 3;">
+      <h3>FPS / Time</h3>
+      <div class="big mono" id="fps">--</div>
+      <div class="muted mono" id="ts">ts: --</div>
+    </div>
+
+    <div class="card" style="grid-column: span 6;">
+      <h3>Counts</h3>
+      <div class="big mono">
+        Beans: <span id="beans" class="ok">--</span>
+        <span class="pill mono">Rocks: <span id="rocks" class="bad">--</span></span>
+        <span class="pill mono">Objects: <span id="objN">--</span></span>
+      </div>
+      <div class="muted">From /api/status: counts + objects</div>
+    </div>
+
+    <div class="card" style="grid-column: span 6;">
+      <h3>Notes / UI Errors</h3>
+      <div class="muted">
+        This page intentionally shows EVERYTHING exposed by the backend (images, objects, params, raw JSON).
+        We will narrow it down later.
+      </div>
+      <div class="inlineErr" id="uiErr"></div>
+    </div>
+  </section>
+
+  <!-- Images -->
+  <section class="grid images">
+    <div class="card imgpanel">
+      <div class="sectionTitle">
+        <h2>Frame (ROI box + header text)</h2>
+        <span class="muted mono">GET /api/frame.jpg</span>
+      </div>
+      <div class="imgwrap">
+        <img id="imgFrame" alt="frame"/>
+        <div class="imgcaption">
+          <span id="frameMeta">-</span>
+          <span class="muted mono">cache-bust</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card imgpanel">
+      <div class="sectionTitle">
+        <h2>ROI (bbox + labels)</h2>
+        <span class="muted mono">GET /api/roi.jpg</span>
+      </div>
+      <div class="imgwrap">
+        <img id="imgRoi" alt="roi"/>
+        <div class="imgcaption">
+          <span id="roiMeta">-</span>
+          <span class="muted mono">cache-bust</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card imgpanel small">
+      <div class="sectionTitle">
+        <h2>Mask</h2>
+        <span class="muted mono">GET /api/mask.jpg</span>
+      </div>
+      <div class="imgwrap">
+        <img id="imgMask" alt="mask"/>
+        <div class="imgcaption">
+          <span id="maskMeta">-</span>
+          <span class="muted mono">grayscale</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Bottom panes -->
+  <section class="grid panes">
+
+    <!-- Objects table -->
+    <div class="card pane left">
+      <div class="sectionTitle">
+        <h2>Objects (full fields)</h2>
+        <div class="row">
+          <span class="muted mono">objects[]</span>
+          <button id="btnCopyObjects">Copy objects JSON</button>
+        </div>
+      </div>
+
+      <div class="scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Label</th>
+              <th>Conf</th>
+              <th>BBox (x,y,w,h)</th>
+              <th>area</th>
+              <th>aspect_ratio</th>
+              <th>circularity</th>
+              <th>solidity</th>
+              <th>perimeter</th>
+            </tr>
+          </thead>
+          <tbody id="objBody"></tbody>
+        </table>
+      </div>
+
+      <div class="muted" style="margin-top:10px;">
+        Note: If the model is not loaded or background is not captured, objects may be empty or labeled UNKNOWN.
+      </div>
+    </div>
+
+    <!-- Params editor + raw JSON -->
+    <div class="card pane right">
+      <div class="sectionTitle">
+        <h2>Params (current + editable)</h2>
+        <div class="row">
+          <button id="btnReloadParams">Reload Params</button>
+          <button id="btnApplyParams">Apply Params</button>
+        </div>
+      </div>
+
+      <div class="muted" style="margin-bottom:10px;">
+        GET/POST /api/params. Changing ROI / blur / bg_n_frames invalidates background and requires re-capture.
+      </div>
+
+      <div class="scroll" style="max-height: 360px; padding: 10px; background: rgba(15,23,42,0.35); border-radius: 14px;">
+        <div class="row">
+          <div class="kv"><label>roi_x</label><input id="p_roi_x" type="number"/></div>
+          <div class="kv"><label>roi_y</label><input id="p_roi_y" type="number"/></div>
+          <div class="kv"><label>roi_w</label><input id="p_roi_w" type="number"/></div>
+          <div class="kv"><label>roi_h</label><input id="p_roi_h" type="number"/></div>
+
+          <div class="kv"><label>min_area</label><input id="p_min_area" type="number"/></div>
+          <div class="kv"><label>max_area</label><input id="p_max_area" type="number"/></div>
+
+          <div class="kv"><label>blur_k</label><input id="p_blur_k" type="number"/></div>
+          <div class="kv"><label>morph_k</label><input id="p_morph_k" type="number"/></div>
+
+          <div class="kv"><label>open_iters</label><input id="p_open_iters" type="number"/></div>
+          <div class="kv"><label>close_iters</label><input id="p_close_iters" type="number"/></div>
+
+          <div class="kv"><label>bg_n_frames</label><input id="p_bg_n_frames" type="number"/></div>
+        </div>
+
+        <div class="inlineErr" id="paramsResult"></div>
+      </div>
+
+      <div class="sectionTitle" style="margin-top:14px;">
+        <h2>Raw Status JSON</h2>
+        <button id="btnCopyStatus">Copy status JSON</button>
+      </div>
+      <pre id="rawJson">{}</pre>
+    </div>
+  </section>
+</main>
+
+<script>
+  // ============
+  // Utilities
+  // ============
+  function fmt(n, digits=4) {
+    if (n === null || n === undefined) return "";
+    if (typeof n !== "number") return String(n);
+    if (!isFinite(n)) return String(n);
+    return n.toFixed(digits);
+  }
+
+  function setText(id, text) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  function setUiError(msg) {
+    setText("uiErr", msg ? ("UI: " + msg) : "");
+  }
+
+  async function apiGet(url) {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error(`${url} -> ${res.status}`);
+    return await res.json();
+  }
+
+  async function apiPost(url, bodyObj) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: bodyObj ? JSON.stringify(bodyObj) : null
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const msg = (j && (j.error || j.message)) ? (j.error || j.message) : `HTTP ${res.status}`;
+      throw new Error(`${url} -> ${msg}`);
+    }
+    return j;
+  }
+
+  // ============
+  // State
+  // ============
+  let running = true;
+  let timer = null;
+
+  // ============
+  // Render
+  // ============
+  function renderStatus(s) {
+    // System
+    const ok = !!s.ok;
+    setText("sysOk", ok ? "OK" : "NOT OK");
+    document.getElementById("sysOk").className = "big mono " + (ok ? "ok" : "bad");
+    setText("sysMsg", "message: " + (s.message ?? "--"));
+
+    // Background
+    const bg = !!s.bg_captured;
+    setText("bgState", bg ? "captured" : "not captured");
+    document.getElementById("bgState").className = "big mono " + (bg ? "ok" : "warn");
+
+    // Model
+    const ml = !!s.model_loaded;
+    setText("modelState", ml ? "loaded" : "not loaded");
+    document.getElementById("modelState").className = "big mono " + (ml ? "ok" : "bad");
+    setText("modelErr", "error: " + (s.model_error ? String(s.model_error) : "--"));
+
+    // FPS / Time
+    setText("fps", s.fps ? fmt(Number(s.fps), 1) : "--");
+    const ts = s.timestamp ? new Date(s.timestamp * 1000).toLocaleString() : "--";
+    setText("ts", "ts: " + ts);
+
+    // Counts
+    const beans = s.counts?.bean ?? 0;
+    const rocks = s.counts?.rock ?? 0;
+    setText("beans", beans);
+    setText("rocks", rocks);
+
+    const objs = Array.isArray(s.objects) ? s.objects : [];
+    setText("objN", objs.length);
+
+    // Objects table
+    const body = document.getElementById("objBody");
+    body.innerHTML = "";
+    for (let i = 0; i < objs.length; i++) {
+      const o = objs[i] || {};
+      const bbox = o.bbox || {};
+      const f = o.features || {};
+      const label = o.label ?? "UNKNOWN";
+      const conf = (o.confidence === null || o.confidence === undefined) ? "" : fmt(Number(o.confidence), 3);
+
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${i}</td>
+        <td>${label}</td>
+        <td>${conf}</td>
+        <td>${bbox.x ?? ""},${bbox.y ?? ""},${bbox.w ?? ""},${bbox.h ?? ""}</td>
+        <td>${fmt(Number(f.area), 2)}</td>
+        <td>${fmt(Number(f.aspect_ratio), 4)}</td>
+        <td>${fmt(Number(f.circularity), 4)}</td>
+        <td>${fmt(Number(f.solidity), 4)}</td>
+        <td>${fmt(Number(f.perimeter), 2)}</td>
+      `;
+      body.appendChild(tr);
+    }
+
+    // Raw JSON
+    document.getElementById("rawJson").textContent = JSON.stringify(s, null, 2);
+
+    // Fill params editor from status.params
+    const p = s.params || {};
+    const setVal = (id, v) => {
+      const el = document.getElementById(id);
+      if (el && (el.value === "" || document.activeElement !== el)) el.value = (v ?? "");
+    };
+
+    setVal("p_roi_x", p.roi_x);
+    setVal("p_roi_y", p.roi_y);
+    setVal("p_roi_w", p.roi_w);
+    setVal("p_roi_h", p.roi_h);
+
+    setVal("p_min_area", p.min_area);
+    setVal("p_max_area", p.max_area);
+
+    setVal("p_blur_k", p.blur_k);
+    setVal("p_morph_k", p.morph_k);
+
+    setVal("p_open_iters", p.open_iters);
+    setVal("p_close_iters", p.close_iters);
+
+    setVal("p_bg_n_frames", p.bg_n_frames);
+
+    // Image meta captions
+    setText("frameMeta", `Beans=${beans} Rocks=${rocks} Objects=${objs.length}`);
+    setText("roiMeta", `ROI objects=${objs.length}`);
+    setText("maskMeta", bg ? "Mask available" : "Mask N/A (no background)");
+  }
+
+  function refreshImages() {
+    const mode = document.getElementById("imgMode").value;
+    if (mode !== "on") return;
+    const t = Date.now();
+    document.getElementById("imgFrame").src = `/api/frame.jpg?t=${t}`;
+    document.getElementById("imgRoi").src   = `/api/roi.jpg?t=${t}`;
+    document.getElementById("imgMask").src  = `/api/mask.jpg?t=${t}`;
+  }
+
+  async function tick() {
+    try {
+      const s = await apiGet("/api/status");
+      renderStatus(s);
+      refreshImages();
+      setText("lastTick", "last: " + new Date().toLocaleTimeString());
+      setUiError("");
+    } catch (e) {
+      setUiError(String(e));
+    }
+  }
+
+  function startLoop() {
+    stopLoop();
+    const ms = Math.max(80, Number(document.getElementById("pollMs").value) || 300);
+    timer = setInterval(() => { if (running) tick(); }, ms);
+  }
+
+  function stopLoop() {
+    if (timer) clearInterval(timer);
+    timer = null;
+  }
+
+  // ============
+  // Actions
+  // ============
+  document.getElementById("btnBg").onclick = async () => {
+    try {
+      await apiPost("/api/capture_background", {});
+      setUiError("Background capture requested.");
+    } catch (e) {
+      setUiError(String(e));
+    }
+  };
+
+  document.getElementById("btnToggle").onclick = () => {
+    running = !running;
+    document.getElementById("btnToggle").textContent = running ? "Pause Refresh" : "Resume Refresh";
+    if (running) tick();
+  };
+
+  document.getElementById("pollMs").addEventListener("change", startLoop);
+  document.getElementById("imgMode").addEventListener("change", () => refreshImages());
+
+  document.getElementById("btnReloadParams").onclick = async () => {
+    try {
+      const j = await apiGet("/api/params");
+      const p = j.params || {};
+      for (const [k, v] of Object.entries(p)) {
+        const el = document.getElementById("p_" + k);
+        if (el) el.value = v;
+      }
+      setText("paramsResult", `Reload OK. bg_captured=${j.bg_captured}`);
+    } catch (e) {
+      setText("paramsResult", String(e));
+    }
+  };
+
+  document.getElementById("btnApplyParams").onclick = async () => {
+    try {
+      const payload = {
+        roi_x: Number(document.getElementById("p_roi_x").value),
+        roi_y: Number(document.getElementById("p_roi_y").value),
+        roi_w: Number(document.getElementById("p_roi_w").value),
+        roi_h: Number(document.getElementById("p_roi_h").value),
+
+        min_area: Number(document.getElementById("p_min_area").value),
+        max_area: Number(document.getElementById("p_max_area").value),
+
+        blur_k: Number(document.getElementById("p_blur_k").value),
+        morph_k: Number(document.getElementById("p_morph_k").value),
+
+        open_iters: Number(document.getElementById("p_open_iters").value),
+        close_iters: Number(document.getElementById("p_close_iters").value),
+
+        bg_n_frames: Number(document.getElementById("p_bg_n_frames").value),
+      };
+
+      const j = await apiPost("/api/params", payload);
+      setText("paramsResult", `Apply OK. changed=${(j.changed || []).join(", ")} bg_invalidated=${j.bg_invalidated}`);
+      tick();
+    } catch (e) {
+      setText("paramsResult", "Apply failed: " + String(e));
+    }
+  };
+
+  document.getElementById("btnCopyStatus").onclick = async () => {
+    try {
+      const s = await apiGet("/api/status");
+      await navigator.clipboard.writeText(JSON.stringify(s, null, 2));
+      setUiError("Copied status JSON to clipboard.");
+    } catch (e) {
+      setUiError(String(e));
+    }
+  };
+
+  document.getElementById("btnCopyObjects").onclick = async () => {
+    try {
+      const s = await apiGet("/api/status");
+      await navigator.clipboard.writeText(JSON.stringify(s.objects || [], null, 2));
+      setUiError("Copied objects JSON to clipboard.");
+    } catch (e) {
+      setUiError(String(e));
+    }
+  };
+
+  // Init
+  refreshImages();
+  tick();
+  startLoop();
+</script>
+</body>
+</html>
