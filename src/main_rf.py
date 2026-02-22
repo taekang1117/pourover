@@ -4,6 +4,7 @@
 import time
 import cv2
 import numpy as np
+import pandas as pd
 import pickle
 from picamera2 import Picamera2
 from rpi_ws281x import PixelStrip, Color
@@ -53,6 +54,38 @@ MIN_AREA = 1000
 MAX_AREA = 8000
 
 MODEL_FILE = "bean_model.pkl"
+
+# Feature columns used by train_model.py (16-feature model).
+FEATURE_COLS_16 = [
+    "area",
+    "aspect_ratio",
+    "circularity",
+    "solidity",
+    "perimeter",
+    "mean_hue",
+    "mean_saturation",
+    "gabor_mean",
+    "gabor_std",
+    "hu1",
+    "hu2",
+    "hu3",
+    "hu4",
+    "hu5",
+    "hu6",
+    "hu7",
+]
+
+# Backward compatibility for old 5-feature models.
+FEATURE_COLS_5 = [
+    "area",
+    "aspect_ratio",
+    "circularity",
+    "solidity",
+    "perimeter",
+]
+
+# Texture kernel reused for per-object texture features.
+GABOR_KERNEL = cv2.getGaborKernel((9, 9), 3.0, np.pi / 4, 8.0, 0.5, 0, ktype=cv2.CV_32F)
 
 # =========================
 # ULN2003 Stepper Setup (28BYJ-48 5V)
@@ -118,25 +151,71 @@ def is_valid_contour(cnt):
     area = cv2.contourArea(cnt)
     return MIN_AREA <= area <= MAX_AREA
 
-def get_features_vector(cnt):
-    # MUST MATCH train_model.py order:
-    # ['area', 'aspect_ratio', 'circularity', 'solidity', 'perimeter']
-    
+def get_model_feature_cols(model):
+    if hasattr(model, "feature_names_in_"):
+        cols = [str(c) for c in model.feature_names_in_]
+        if len(cols) == 0:
+            raise ValueError("Model has empty feature_names_in_.")
+        return cols
+    n_features = int(getattr(model, "n_features_in_", 0))
+    if n_features == len(FEATURE_COLS_16):
+        return FEATURE_COLS_16
+    if n_features == len(FEATURE_COLS_5):
+        return FEATURE_COLS_5
+    raise ValueError(
+        f"Unsupported model feature count: {n_features}. "
+        f"Expected {len(FEATURE_COLS_5)} or {len(FEATURE_COLS_16)}."
+    )
+
+
+def get_features_dict(cnt, roi_bgr):
     area = float(cv2.contourArea(cnt))
     perim = float(cv2.arcLength(cnt, True))
-    
-    if perim == 0: return None
+    if perim == 0:
+        return None
 
     circularity = (4.0 * np.pi * area) / (perim * perim)
-    
+
     hull = cv2.convexHull(cnt)
     hull_area = float(cv2.contourArea(hull))
     solidity = area / hull_area if hull_area > 0 else 0
-    
+
     x, y, w, h = cv2.boundingRect(cnt)
     aspect_ratio_invariant = float(max(w, h)) / (min(w, h) + 1e-9)
+    obj_mask = np.zeros(roi_bgr.shape[:2], dtype=np.uint8)
+    cv2.drawContours(obj_mask, [cnt], -1, 255, thickness=-1)
 
-    return [area, aspect_ratio_invariant, circularity, solidity, perim]
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    mean_h, mean_s, _ = cv2.mean(hsv, mask=obj_mask)[:3]
+
+    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+    gabor_resp = cv2.filter2D(gray, cv2.CV_32F, GABOR_KERNEL)
+    gabor_abs = np.abs(gabor_resp)
+    gabor_mean, gabor_std = cv2.meanStdDev(gabor_abs, mask=obj_mask)
+    gabor_mean = float(gabor_mean[0][0])
+    gabor_std = float(gabor_std[0][0])
+
+    hu = cv2.HuMoments(cv2.moments(cnt)).flatten()
+    hu_log = [float(-np.sign(v) * np.log10(abs(v) + 1e-12)) for v in hu]
+
+    return {
+        "area": area,
+        "aspect_ratio": aspect_ratio_invariant,
+        "circularity": circularity,
+        "solidity": solidity,
+        "perimeter": perim,
+        "mean_hue": float(mean_h),
+        "mean_saturation": float(mean_s),
+        "gabor_mean": gabor_mean,
+        "gabor_std": gabor_std,
+        "hu1": hu_log[0],
+        "hu2": hu_log[1],
+        "hu3": hu_log[2],
+        "hu4": hu_log[3],
+        "hu5": hu_log[4],
+        "hu6": hu_log[5],
+        "hu7": hu_log[6],
+    }
 
 class ULN2003Stepper:
     HALF_SEQ = [
@@ -208,6 +287,12 @@ def main():
     model = load_model()
     if model is None:
         sys.exit(1)
+    try:
+        model_feature_cols = get_model_feature_cols(model)
+    except ValueError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
+    print(f"Using {len(model_feature_cols)} model features: {model_feature_cols}")
 
     roi_rect = clamp_roi(ROI_X, ROI_Y, ROI_W, ROI_H, FRAME_W, FRAME_H)
     rx, ry, rw, rh = roi_rect
@@ -267,16 +352,18 @@ def main():
                 for cnt in contours:
                     if not is_valid_contour(cnt):
                         continue
-                    
-                    vec = get_features_vector(cnt)
-                    if vec:
-                        feature_list.append(vec)
+
+                    feats = get_features_dict(cnt, roi_bgr)
+                    if feats:
+                        row = {name: feats.get(name, 0.0) for name in model_feature_cols}
+                        feature_list.append(row)
                         valid_contours.append(cnt)
                         coords.append(cv2.boundingRect(cnt)) # (x,y,w,h)
 
                 # 2. Predict
                 if feature_list:
-                    preds = model.predict(feature_list)
+                    feature_df = pd.DataFrame(feature_list, columns=model_feature_cols)
+                    preds = model.predict(feature_df)
                     # probs = model.predict_proba(feature_list) # for confidence calc if needed
 
                     for i, label in enumerate(preds):
