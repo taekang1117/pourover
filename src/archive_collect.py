@@ -43,8 +43,11 @@ BLUR_K = 5
 MORPH_K = 5
 OPEN_ITERS = 2
 CLOSE_ITERS = 2
-MIN_AREA = 800
-MAX_AREA = 40000
+# MIN_AREA = 800
+# MAX_AREA = 40000
+
+MIN_AREA = 1000
+MAX_AREA = 8000
 
 # File to save data
 DATA_FILE = "training_data.csv"
