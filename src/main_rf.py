@@ -30,6 +30,12 @@ def set_max_white():
         strip.setPixelColor(i, white)
     strip.show()
 
+def set_led_off():
+    off = Color(0, 0, 0)
+    for i in range(LED_COUNT):
+        strip.setPixelColor(i, off)
+    strip.show()
+
 # =========================
 # Configuration
 # =========================
@@ -47,6 +53,18 @@ MIN_AREA = 1000
 MAX_AREA = 8000
 
 MODEL_FILE = "bean_model.pkl"
+
+# =========================
+# ULN2003 Stepper Setup (28BYJ-48 5V)
+# =========================
+FLIP_IN1 = 5
+FLIP_IN2 = 6
+FLIP_IN3 = 13
+FLIP_IN4 = 19
+
+FLIP_STEP_DELAY = 0.0018
+STEPS_135_DEG = 768
+RETURN_WAIT_SEC = 0.5
 
 # =========================
 # Helpers
@@ -114,6 +132,69 @@ def get_features_vector(cnt):
 
     return [area, aspect_ratio_invariant, circularity, solidity, perim]
 
+class ULN2003Stepper:
+    HALF_SEQ = [
+        (1, 0, 0, 0),
+        (1, 1, 0, 0),
+        (0, 1, 0, 0),
+        (0, 1, 1, 0),
+        (0, 0, 1, 0),
+        (0, 0, 1, 1),
+        (0, 0, 0, 1),
+        (1, 0, 0, 1),
+    ]
+
+    def __init__(self, in1, in2, in3, in4, step_delay=0.002):
+        import RPi.GPIO as GPIO
+        self.GPIO = GPIO
+        self.pins = [in1, in2, in3, in4]
+        self.step_delay = step_delay
+        self._idx = 0
+
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setwarnings(False)
+        for p in self.pins:
+            GPIO.setup(p, GPIO.OUT)
+            GPIO.output(p, 0)
+
+    def _write(self, a, b, c, d):
+        self.GPIO.output(self.pins[0], a)
+        self.GPIO.output(self.pins[1], b)
+        self.GPIO.output(self.pins[2], c)
+        self.GPIO.output(self.pins[3], d)
+
+    def step(self, steps, direction=1):
+        direction = 1 if direction >= 0 else -1
+        for _ in range(abs(int(steps))):
+            self._idx = (self._idx + direction) % len(self.HALF_SEQ)
+            self._write(*self.HALF_SEQ[self._idx])
+            time.sleep(self.step_delay)
+
+    def release(self):
+        self._write(0, 0, 0, 0)
+
+    def cleanup(self):
+        self.release()
+        self.GPIO.cleanup()
+
+
+def move_to(stepper, target_pos, current_pos):
+    delta = int(target_pos - current_pos)
+    if delta == 0:
+        return current_pos
+    stepper.step(abs(delta), direction=+1 if delta > 0 else -1)
+    return target_pos
+
+
+def run_flip(stepper, current_pos, direction):
+    start_pos = current_pos
+    target_pos = start_pos + (STEPS_135_DEG if direction > 0 else -STEPS_135_DEG)
+    current_pos = move_to(stepper, target_pos, current_pos)
+    time.sleep(RETURN_WAIT_SEC)
+    current_pos = move_to(stepper, start_pos, current_pos)
+    stepper.release()
+    return current_pos
+
 # =========================
 # Main
 # =========================
@@ -126,6 +207,8 @@ def main():
     rx, ry, rw, rh = roi_rect
 
     picam2 = Picamera2()
+    stepper = None
+    stepper_pos = 0
     set_max_white()
     
     config = picam2.create_preview_configuration(main={"format": "RGB888", "size": (FRAME_W, FRAME_H)})
@@ -139,86 +222,111 @@ def main():
         pass
 
     bg_gray = None
-    
-    print("Inference Mode")
-    print("b: Capture Background | q: Quit")
+    try:
+        try:
+            stepper = ULN2003Stepper(
+                FLIP_IN1, FLIP_IN2, FLIP_IN3, FLIP_IN4,
+                step_delay=FLIP_STEP_DELAY
+            )
+            print("Flipper stepper initialized.")
+        except Exception as exc:
+            print(f"Flipper stepper unavailable: {exc}")
+            print("Continuing without flipper controls.")
 
-    while True:
-        frame_rgb = picam2.capture_array()
-        full_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-        
-        cv2.rectangle(full_bgr, (rx, ry), (rx + rw, ry + rh), (0, 255, 255), 2)
-        roi_bgr = full_bgr[ry:ry + rh, rx:rx + rw]
-        vis_roi = roi_bgr.copy()
+        print("Inference Mode")
+        print("b: Capture Background | r/l: Flip 135 deg and return | q: Quit")
 
-        if bg_gray is None:
-            cv2.putText(full_bgr, "Press 'b' for BACKGROUND", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-        else:
-            mask = get_object_mask(roi_bgr, bg_gray)
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        while True:
+            frame_rgb = picam2.capture_array()
+            full_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
             
-            beans_count = 0
-            rocks_count = 0
+            cv2.rectangle(full_bgr, (rx, ry), (rx + rw, ry + rh), (0, 255, 255), 2)
+            roi_bgr = full_bgr[ry:ry + rh, rx:rx + rw]
+            vis_roi = roi_bgr.copy()
 
-            feature_list = []
-            valid_contours = []
-            coords = []
-
-            # 1. Collect features for batch prediction (faster than one by one, though for <50 objs it matters little)
-            for cnt in contours:
-                if cv2.contourArea(cnt) < MIN_AREA or cv2.contourArea(cnt) > MAX_AREA:
-                    continue
+            if bg_gray is None:
+                cv2.putText(full_bgr, "Press 'b' for BACKGROUND", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+            else:
+                mask = get_object_mask(roi_bgr, bg_gray)
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
                 
-                vec = get_features_vector(cnt)
-                if vec:
-                    feature_list.append(vec)
-                    valid_contours.append(cnt)
-                    coords.append(cv2.boundingRect(cnt)) # (x,y,w,h)
+                beans_count = 0
+                rocks_count = 0
 
-            # 2. Predict
-            if feature_list:
-                preds = model.predict(feature_list)
-                # probs = model.predict_proba(feature_list) # for confidence calc if needed
+                feature_list = []
+                valid_contours = []
+                coords = []
 
-                for i, label in enumerate(preds):
-                    cnt = valid_contours[i]
-                    x, y, w, h = coords[i]
+                # 1. Collect features for batch prediction (faster than one by one, though for <50 objs it matters little)
+                for cnt in contours:
+                    if cv2.contourArea(cnt) < MIN_AREA or cv2.contourArea(cnt) > MAX_AREA:
+                        continue
                     
-                    if label == 1: # BEAN
-                        color = (0, 255, 0)
-                        text = "BEAN"
-                        beans_count += 1
-                    else: # ROCK
-                        color = (0, 0, 255)
-                        text = "ROCK"
-                        rocks_count += 1
-                    
-                    cv2.rectangle(vis_roi, (x, y), (x+w, y+h), color, 2)
-                    cv2.putText(vis_roi, text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-            
-            # Draw stats
-            header = f"Beans: {beans_count} | Rocks: {rocks_count}"
-            cv2.putText(full_bgr, header, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-            
-            if len(contours) > 0 and len(feature_list) == 0:
-                 # Objects detected but filtered out by area
-                 pass
+                    vec = get_features_vector(cnt)
+                    if vec:
+                        feature_list.append(vec)
+                        valid_contours.append(cnt)
+                        coords.append(cv2.boundingRect(cnt)) # (x,y,w,h)
 
-            cv2.imshow("Mask", mask)
+                # 2. Predict
+                if feature_list:
+                    preds = model.predict(feature_list)
+                    # probs = model.predict_proba(feature_list) # for confidence calc if needed
 
-        cv2.imshow("Review", full_bgr)
-        cv2.imshow("Inference", vis_roi)
+                    for i, label in enumerate(preds):
+                        cnt = valid_contours[i]
+                        x, y, w, h = coords[i]
+                        
+                        if label == 1: # BEAN
+                            color = (0, 255, 0)
+                            text = "BEAN"
+                            beans_count += 1
+                        else: # ROCK
+                            color = (0, 0, 255)
+                            text = "ROCK"
+                            rocks_count += 1
+                        
+                        cv2.rectangle(vis_roi, (x, y), (x+w, y+h), color, 2)
+                        cv2.putText(vis_roi, text, (x, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                
+                # Draw stats
+                header = f"Beans: {beans_count} | Rocks: {rocks_count}"
+                cv2.putText(full_bgr, header, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                
+                if len(contours) > 0 and len(feature_list) == 0:
+                     # Objects detected but filtered out by area
+                     pass
 
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            break
-        elif key == ord('b'):
-            print("Capturing background...")
-            bg_gray = capture_background_gray(picam2, roi_rect)
-            print("Background captured.")
+                cv2.imshow("Mask", mask)
 
-    picam2.stop()
-    cv2.destroyAllWindows()
+            cv2.imshow("Review", full_bgr)
+            cv2.imshow("Inference", vis_roi)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                set_led_off()
+                break
+            elif key == ord('b'):
+                print("Capturing background...")
+                bg_gray = capture_background_gray(picam2, roi_rect)
+                print("Background captured.")
+            elif key == ord('r'):
+                if stepper is None:
+                    print("Flipper not initialized.")
+                    continue
+                stepper_pos = run_flip(stepper, stepper_pos, direction=+1)
+                print("Flipper rotated right and returned.")
+            elif key == ord('l'):
+                if stepper is None:
+                    print("Flipper not initialized.")
+                    continue
+                stepper_pos = run_flip(stepper, stepper_pos, direction=-1)
+                print("Flipper rotated left and returned.")
+    finally:
+        picam2.stop()
+        cv2.destroyAllWindows()
+        if stepper is not None:
+            stepper.cleanup()
 
 if __name__ == "__main__":
     main()
