@@ -35,10 +35,9 @@ def set_led_off():
     strip.show()
 
 # =========================
-# Configuration
+# Configuration (DO NOT TOUCH per your request)
 # =========================
 FRAME_W, FRAME_H = 960, 540
-# ROI_X, ROI_Y, ROI_W, ROI_H = 260, 90, 440, 360
 ROI_X, ROI_Y, ROI_W, ROI_H = 280, 23, 431, 450
 
 BLUR_K = 5
@@ -53,66 +52,51 @@ MODEL_FILE = "bean_model.pkl"
 # =========================
 # 12V TMC2209 Slow Feeders (EN hard-grounded)
 # =========================
-# BCM pins
 M1_STEP = 17
 M1_DIR  = 27
-
 M2_STEP = 22
 M2_DIR  = 23
 
-# Slow & safe pulses
 STEP_PULSE_US  = 20
 STEP_GAP_US    = 2000
 DIR_SETTLE_SEC = 0.05
-
-# Dose size (tune)
 DOSE_STEPS = 300
 
-# Direction normal (flip if motor runs backwards)
 M1_DIR_NORMAL = True
 M2_DIR_NORMAL = True
 
 # =========================
 # Auto Feeder Control (slow, safe)
 # =========================
-AUTO_FEED_ENABLED = True         # auto mode ON by default
-FEED_COOLDOWN_SEC = 1.5          # minimum time between feeds (bigger = slower)
-POST_FEED_SETTLE_SEC = 0.45      # wait after feeding before trusting "empty" again
-EMPTY_MASK_THRESH = 500          # mask_area < this => treat as empty (tune)
-EMPTY_FRAMES = 10                # require this many consecutive empty frames to feed
+AUTO_FEED_ENABLED = True
+FEED_COOLDOWN_SEC = 1.5
+POST_FEED_SETTLE_SEC = 0.45
+EMPTY_MASK_THRESH = 500
+EMPTY_FRAMES = 10
+
+# =========================
+# Auto Flip Control (NEW)
+# =========================
+AUTO_FLIP_ENABLED = True
+FLIP_STABLE_FRAMES = 6      # require stable detection before flipping
+FLIP_COOLDOWN_SEC = 1.0     # minimum time between flips (avoid spam)
+CLEAR_BEFORE_FLIP_THRESH = 600  # optional: require "object present" threshold; uses mask_area
+ROCK_WINS_IF_BOTH = True    # if both detected, treat as ROCK
+
+# If your flipper direction is reversed, swap these:
+FLIP_DIR_FOR_BEAN = +1      # +1 means "r" direction in run_flip()
+FLIP_DIR_FOR_ROCK = -1
 
 # =========================
 # Feature columns used by train_model.py (16-feature model).
 # =========================
 FEATURE_COLS_16 = [
-    "area",
-    "aspect_ratio",
-    "circularity",
-    "solidity",
-    "perimeter",
-    "mean_hue",
-    "mean_saturation",
-    "gabor_mean",
-    "gabor_std",
-    "hu1",
-    "hu2",
-    "hu3",
-    "hu4",
-    "hu5",
-    "hu6",
-    "hu7",
+    "area","aspect_ratio","circularity","solidity","perimeter",
+    "mean_hue","mean_saturation","gabor_mean","gabor_std",
+    "hu1","hu2","hu3","hu4","hu5","hu6","hu7",
 ]
+FEATURE_COLS_5 = ["area","aspect_ratio","circularity","solidity","perimeter"]
 
-# Backward compatibility for old 5-feature models.
-FEATURE_COLS_5 = [
-    "area",
-    "aspect_ratio",
-    "circularity",
-    "solidity",
-    "perimeter",
-]
-
-# Texture kernel reused for per-object texture features.
 GABOR_KERNEL = cv2.getGaborKernel((9, 9), 3.0, np.pi / 4, 8.0, 0.5, 0, ktype=cv2.CV_32F)
 
 # =========================
@@ -195,7 +179,6 @@ def capture_background_gray(picam2, roi_rect, n=20):
 def get_object_mask(roi_bgr, bg_gray):
     g1 = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
     g1 = cv2.GaussianBlur(g1, (BLUR_K, BLUR_K), 0)
-    # Suppress bright reflections: keep only pixels that became darker than background.
     diff = cv2.subtract(bg_gray, g1)
     otsu_t, _ = cv2.threshold(diff, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     min_diff_t = 12
@@ -238,6 +221,7 @@ def get_features_dict(cnt, roi_bgr):
 
     x, y, w, h = cv2.boundingRect(cnt)
     aspect_ratio_invariant = float(max(w, h)) / (min(w, h) + 1e-9)
+
     obj_mask = np.zeros(roi_bgr.shape[:2], dtype=np.uint8)
     cv2.drawContours(obj_mask, [cnt], -1, 255, thickness=-1)
 
@@ -338,7 +322,7 @@ def run_flip(stepper, current_pos, direction):
 # Main
 # =========================
 def main():
-    global AUTO_FEED_ENABLED
+    global AUTO_FEED_ENABLED, AUTO_FLIP_ENABLED
 
     model = load_model()
     if model is None:
@@ -350,7 +334,7 @@ def main():
         sys.exit(1)
     print(f"Using {len(model_feature_cols)} model features: {model_feature_cols}")
 
-    # ---- GPIO init for feeders only (does not touch camera/LED settings) ----
+    # ---- GPIO init for feeders ----
     try:
         import RPi.GPIO as GPIO
         GPIO.setmode(GPIO.BCM)
@@ -391,8 +375,13 @@ def main():
     # ===== Auto feeder runtime state =====
     last_feed_time = 0.0
     empty_streak = 0
-    feed_motor_toggle = 1   # 1->M1, 2->M2 (alternate)
-    block_until = 0.0       # post-feed settle block timer
+    feed_motor_toggle = 1   # alternate M1/M2
+    block_until = 0.0
+
+    # ===== Auto flip runtime state =====
+    last_flip_time = 0.0
+    decision_streak = 0
+    last_decision = None  # "BEAN"/"ROCK"/None
 
     bg_gray = None
     try:
@@ -406,14 +395,14 @@ def main():
             print(f"Flipper stepper unavailable: {exc}")
             print("Continuing without flipper controls.")
 
-        print("Inference Mode (AUTO feeders enabled)")
+        print("Inference Mode (AUTO feeders + AUTO flip)")
         print("Keys:")
         print("  b: Capture Background")
-        print("  r/l: Flip 135 deg and return")
-        print("  1: Manual dose Feeder 1 (12V)")
-        print("  2: Manual dose Feeder 2 (12V)")
+        print("  1/2: Manual dose feeder 1/2")
         print("  a: Toggle AUTO feeder ON/OFF")
+        print("  z: Toggle AUTO flip ON/OFF")
         print("  m: Switch next AUTO feeder (M1<->M2)")
+        print("  r/l: Manual flip right/left (debug)")
         print("  q: Quit")
 
         while True:
@@ -427,6 +416,7 @@ def main():
             mask_area = 0
             beans_count = 0
             rocks_count = 0
+            decision = None
 
             if bg_gray is None:
                 cv2.putText(full_bgr, "Press 'b' for BACKGROUND", (20, 50),
@@ -466,7 +456,16 @@ def main():
                         cv2.putText(vis_roi, text, (x, y - 5),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-                # ===== AUTO FEED (only uses mask_area; does not change vision/model settings) =====
+                # ---------- DECISION (for auto flip) ----------
+                # Rock wins if both present (matches your project rule)
+                if ROCK_WINS_IF_BOTH and rocks_count > 0:
+                    decision = "ROCK"
+                elif beans_count > 0:
+                    decision = "BEAN"
+                else:
+                    decision = None
+
+                # ===== AUTO FEED =====
                 now = time.time()
                 if feeder1 is not None and feeder2 is not None:
                     if now < block_until:
@@ -498,13 +497,44 @@ def main():
                             empty_streak = 0
                             block_until = last_feed_time + POST_FEED_SETTLE_SEC
 
+                # ===== AUTO FLIP =====
+                now = time.time()
+                if AUTO_FLIP_ENABLED and (stepper is not None):
+                    # Require "object present" (mask_area high enough) to avoid flipping on noise
+                    if decision is not None and mask_area > CLEAR_BEFORE_FLIP_THRESH:
+                        if decision == last_decision:
+                            decision_streak += 1
+                        else:
+                            last_decision = decision
+                            decision_streak = 1
+                    else:
+                        last_decision = None
+                        decision_streak = 0
+
+                    if (decision_streak >= FLIP_STABLE_FRAMES and
+                        (now - last_flip_time) >= FLIP_COOLDOWN_SEC):
+
+                        if last_decision == "BEAN":
+                            flip_dir = FLIP_DIR_FOR_BEAN
+                        else:
+                            flip_dir = FLIP_DIR_FOR_ROCK
+
+                        print(f"[AUTO FLIP] decision={last_decision} dir={flip_dir}")
+                        stepper_pos = run_flip(stepper, stepper_pos, direction=flip_dir)
+                        last_flip_time = time.time()
+                        decision_streak = 0
+                        last_decision = None
+
+                        # after flip, ignore empty detection briefly (prevents immediate auto feed / reflip)
+                        block_until = max(block_until, last_flip_time + 0.35)
+
                 header = (
-                    f"Beans:{beans_count} Rocks:{rocks_count} | "
-                    f"mask:{mask_area} empty:{empty_streak}/{EMPTY_FRAMES} | "
-                    f"AUTO:{'ON' if AUTO_FEED_ENABLED else 'OFF'} next:{'M1' if feed_motor_toggle==1 else 'M2'}"
+                    f"Beans:{beans_count} Rocks:{rocks_count} | mask:{mask_area} "
+                    f"| empty:{empty_streak}/{EMPTY_FRAMES} AUTO_FEED:{'ON' if AUTO_FEED_ENABLED else 'OFF'} "
+                    f"| decision:{decision or 'NONE'} streak:{decision_streak}/{FLIP_STABLE_FRAMES} AUTO_FLIP:{'ON' if AUTO_FLIP_ENABLED else 'OFF'}"
                 )
                 cv2.putText(full_bgr, header, (20, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
                 cv2.imshow("Mask", mask)
 
@@ -520,26 +550,29 @@ def main():
                 print("Capturing background...")
                 bg_gray = capture_background_gray(picam2, roi_rect)
                 print("Background captured.")
-                # reset auto state so it doesn't instantly feed on first frame
-                last_feed_time = time.time()
+                # prevent instant feed/flip on first frame
+                t = time.time()
+                last_feed_time = t
+                last_flip_time = t
                 empty_streak = 0
-                block_until = last_feed_time + POST_FEED_SETTLE_SEC
+                decision_streak = 0
+                last_decision = None
+                block_until = t + POST_FEED_SETTLE_SEC
 
             elif key == ord('r'):
                 if stepper is None:
                     print("Flipper not initialized.")
                     continue
                 stepper_pos = run_flip(stepper, stepper_pos, direction=+1)
-                print("Flipper rotated right and returned.")
+                print("Manual flip right and returned.")
 
             elif key == ord('l'):
                 if stepper is None:
                     print("Flipper not initialized.")
                     continue
                 stepper_pos = run_flip(stepper, stepper_pos, direction=-1)
-                print("Flipper rotated left and returned.")
+                print("Manual flip left and returned.")
 
-            # ===== Feeder manual keys =====
             elif key == ord('1'):
                 if feeder1 is None:
                     print("Feeder 1 not initialized.")
@@ -566,17 +599,19 @@ def main():
                 AUTO_FEED_ENABLED = not AUTO_FEED_ENABLED
                 print(f"[MODE] AUTO_FEED_ENABLED -> {AUTO_FEED_ENABLED}")
 
+            elif key == ord('z'):
+                AUTO_FLIP_ENABLED = not AUTO_FLIP_ENABLED
+                print(f"[MODE] AUTO_FLIP_ENABLED -> {AUTO_FLIP_ENABLED}")
+
             elif key == ord('m'):
-                # switch which motor will be used NEXT in auto
                 feed_motor_toggle = 2 if feed_motor_toggle == 1 else 1
-                print(f"[MODE] Next AUTO motor -> {'M1' if feed_motor_toggle==1 else 'M2'}")
+                print(f"[MODE] Next AUTO feeder -> {'M1' if feed_motor_toggle==1 else 'M2'}")
 
     finally:
         picam2.stop()
         cv2.destroyAllWindows()
         if stepper is not None:
             stepper.cleanup()
-        # Note: stepper.cleanup() calls GPIO.cleanup() which will reset feeder pins too (that's fine).
 
 if __name__ == "__main__":
     main()
