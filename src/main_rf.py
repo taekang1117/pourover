@@ -55,6 +55,22 @@ MAX_AREA = 10000
 
 MODEL_FILE = "bean_model.pkl"
 
+# =========================
+# Feeder Motors (STEP/DIR)
+# =========================
+M1_STEP = 17
+M1_DIR = 27
+M2_STEP = 22
+M2_DIR = 23
+
+STEP_PULSE_US = 20
+STEP_GAP_US = 2000
+DIR_SETTLE_SEC = 0.05
+DOSE_STEPS = 300
+
+M1_DIR_NORMAL = True
+M2_DIR_NORMAL = True
+
 # Feature columns used by train_model.py (16-feature model).
 FEATURE_COLS_16 = [
     "area",
@@ -266,6 +282,31 @@ class ULN2003Stepper:
         self.GPIO.cleanup()
 
 
+class StepperTMC2209_EN_GND:
+    """STEP/DIR feeder stepper (driver EN pin externally tied low)."""
+
+    def __init__(self, gpio_mod, step_pin, dir_pin, dir_normal=True, name="M"):
+        self.gpio = gpio_mod
+        self.step_pin = step_pin
+        self.dir_pin = dir_pin
+        self.dir_normal = dir_normal
+        self.name = name
+
+    def set_dir(self, forward):
+        level = self.gpio.HIGH if (forward == self.dir_normal) else self.gpio.LOW
+        self.gpio.output(self.dir_pin, level)
+
+    def step_n(self, steps, step_gap_us=STEP_GAP_US, pulse_us=STEP_PULSE_US):
+        time.sleep(DIR_SETTLE_SEC)
+        pulse_s = pulse_us / 1_000_000.0
+        gap_s = step_gap_us / 1_000_000.0
+        for _ in range(int(steps)):
+            self.gpio.output(self.step_pin, self.gpio.HIGH)
+            time.sleep(pulse_s)
+            self.gpio.output(self.step_pin, self.gpio.LOW)
+            time.sleep(gap_s)
+
+
 def move_to(stepper, target_pos, current_pos):
     delta = int(target_pos - current_pos)
     if delta == 0:
@@ -303,6 +344,9 @@ def main():
     picam2 = Picamera2()
     stepper = None
     stepper_pos = 0
+    gpio_mod = None
+    feeder_m1 = None
+    feeder_m2 = None
     set_max_white()
     
     config = picam2.create_preview_configuration(main={"format": "RGB888", "size": (FRAME_W, FRAME_H)})
@@ -318,6 +362,25 @@ def main():
     bg_gray = None
     try:
         try:
+            try:
+                import RPi.GPIO as GPIO
+                gpio_mod = GPIO
+                gpio_mod.setmode(gpio_mod.BCM)
+                gpio_mod.setwarnings(False)
+                for p in [M1_STEP, M1_DIR, M2_STEP, M2_DIR]:
+                    gpio_mod.setup(p, gpio_mod.OUT)
+                    gpio_mod.output(p, gpio_mod.LOW)
+                feeder_m1 = StepperTMC2209_EN_GND(
+                    gpio_mod, M1_STEP, M1_DIR, dir_normal=M1_DIR_NORMAL, name="M1"
+                )
+                feeder_m2 = StepperTMC2209_EN_GND(
+                    gpio_mod, M2_STEP, M2_DIR, dir_normal=M2_DIR_NORMAL, name="M2"
+                )
+                print("Feeder motors initialized (M1/M2).")
+            except Exception as exc:
+                print(f"Feeder motors unavailable: {exc}")
+                print("Continuing without feeder controls.")
+
             stepper = ULN2003Stepper(
                 FLIP_IN1, FLIP_IN2, FLIP_IN3, FLIP_IN4,
                 step_delay=FLIP_STEP_DELAY
@@ -328,7 +391,7 @@ def main():
             print("Continuing without flipper controls.")
 
         print("Inference Mode")
-        print("b: Capture Background | r/l: Flip 135 deg and return | q: Quit")
+        print("b: Capture Background | 1/2: Dose feeder M1/M2 | r/l: Flip 135 deg and return | q: Quit")
 
         while True:
             frame_rgb = picam2.capture_array()
@@ -418,11 +481,27 @@ def main():
                     continue
                 stepper_pos = run_flip(stepper, stepper_pos, direction=-1)
                 print("Flipper rotated left and returned.")
+            elif key == ord('1'):
+                if feeder_m1 is None:
+                    print("Feeder M1 not initialized.")
+                    continue
+                feeder_m1.set_dir(True)
+                feeder_m1.step_n(DOSE_STEPS)
+                print(f"Feeder M1 dosed ({DOSE_STEPS} steps).")
+            elif key == ord('2'):
+                if feeder_m2 is None:
+                    print("Feeder M2 not initialized.")
+                    continue
+                feeder_m2.set_dir(True)
+                feeder_m2.step_n(DOSE_STEPS)
+                print(f"Feeder M2 dosed ({DOSE_STEPS} steps).")
     finally:
         picam2.stop()
         cv2.destroyAllWindows()
         if stepper is not None:
-            stepper.cleanup()
+            stepper.release()
+        if gpio_mod is not None:
+            gpio_mod.cleanup()
 
 if __name__ == "__main__":
     main()
