@@ -11,9 +11,7 @@ from rpi_ws281x import PixelStrip, Color
 import os
 import sys
 
-# =========================
-# WS2812 / NeoPixel Setup
-# =========================
+# ========LED============
 LED_COUNT = 7
 LED_PIN = 18
 LED_FREQ_HZ = 800000
@@ -37,9 +35,7 @@ def set_led_off():
         strip.setPixelColor(i, off)
     strip.show()
 
-# =========================
-# Configuration
-# =========================
+# =========FRAMES=========
 FRAME_W, FRAME_H = 960, 540
 # ROI_X, ROI_Y, ROI_W, ROI_H = 260, 90, 440, 360
 ROI_X, ROI_Y, ROI_W, ROI_H = 280, 23, 431, 450
@@ -55,9 +51,7 @@ MAX_AREA = 10000
 
 MODEL_FILE = "bean_model.pkl"
 
-# =========================
-# Feeder Motors (STEP/DIR)
-# =========================
+# =========Feeder Motors (STEP/DIR)========
 M1_STEP = 17
 M1_DIR = 27
 M2_STEP = 22
@@ -71,7 +65,7 @@ DOSE_STEPS = 300
 M1_DIR_NORMAL = True
 M2_DIR_NORMAL = True
 
-# Feature columns used by train_model.py (16-feature model).
+# =========Features (16)========
 FEATURE_COLS_16 = [
     "area",
     "aspect_ratio",
@@ -91,7 +85,7 @@ FEATURE_COLS_16 = [
     "hu7",
 ]
 
-# Backward compatibility for old 5-feature models.
+# =========OLD MODEL (KEEP IT)========
 FEATURE_COLS_5 = [
     "area",
     "aspect_ratio",
