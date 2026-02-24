@@ -84,8 +84,8 @@ CLEAR_BEFORE_FLIP_THRESH = 600  # optional: require "object present" threshold; 
 ROCK_WINS_IF_BOTH = True    # if both detected, treat as ROCK
 
 # If your flipper direction is reversed, swap these:
-FLIP_DIR_FOR_BEAN = +1      # +1 means "r" direction in run_flip()
-FLIP_DIR_FOR_ROCK = -1
+FLIP_DIR_FOR_BEAN = -1      # +1 means "r" direction in run_flip()
+FLIP_DIR_FOR_ROCK = +1
 
 # =========================
 # Feature columns used by train_model.py (16-feature model).
