@@ -75,17 +75,28 @@ EMPTY_MASK_THRESH = 500
 EMPTY_FRAMES = 10
 
 # =========================
-# Auto Flip Control (NEW)
+# Auto Flip Control
 # =========================
 AUTO_FLIP_ENABLED = True
-FLIP_STABLE_FRAMES = 6      # require stable detection before flipping
-FLIP_COOLDOWN_SEC = 1.0     # minimum time between flips (avoid spam)
-CLEAR_BEFORE_FLIP_THRESH = 600  # optional: require "object present" threshold; uses mask_area
-ROCK_WINS_IF_BOTH = True    # if both detected, treat as ROCK
+FLIP_STABLE_FRAMES = 6
+FLIP_COOLDOWN_SEC = 1.0
+CLEAR_BEFORE_FLIP_THRESH = 600
+ROCK_WINS_IF_BOTH = True
 
-# If your flipper direction is reversed, swap these:
-FLIP_DIR_FOR_BEAN = -1      # +1 means "r" direction in run_flip()
+FLIP_DIR_FOR_BEAN = -1
 FLIP_DIR_FOR_ROCK = +1
+
+# =========================
+# NEW: CV Gate / Anti-noise Sequencing
+# =========================
+DETECT_ONLY_AFTER_FEED = True          # 你要的：feeder 後才開始 pick up object
+CV_GATE_AFTER_FEED_SEC = 0.35          # feed後先忽略CV (震動/模糊/亮度變動)
+DETECT_WINDOW_AFTER_FEED_SEC = 2.8     # 只在 feed 後這段時間內允許做「翻盤決策」
+PRESENT_STABLE_FRAMES = 4              # 連續幾幀 mask_area 都夠大才算真的有物體 (壓 noise)
+
+WAIT_CLEAR_AFTER_FLIP = True
+CLEAR_AFTER_FLIP_THRESH = 450          # flip後判定「清空」的閾值(比present低一點比較穩)
+CLEAR_STABLE_FRAMES = 6                # 連續幾幀清空才允許下一次 flip
 
 # =========================
 # Feature columns used by train_model.py (16-feature model).
@@ -310,12 +321,27 @@ def move_to(stepper, target_pos, current_pos):
     return target_pos
 
 def run_flip(stepper, current_pos, direction):
+    """
+    Robust flip: always attempt to return to origin even if something goes wrong.
+    """
     start_pos = current_pos
     target_pos = start_pos + (STEPS_135_DEG if direction > 0 else -STEPS_135_DEG)
-    current_pos = move_to(stepper, target_pos, current_pos)
-    time.sleep(RETURN_WAIT_SEC)
-    current_pos = move_to(stepper, start_pos, current_pos)
-    stepper.release()
+
+    try:
+        current_pos = move_to(stepper, target_pos, current_pos)
+        time.sleep(RETURN_WAIT_SEC)
+    finally:
+        # Always try to go back
+        try:
+            current_pos = move_to(stepper, start_pos, current_pos)
+        except Exception as e:
+            print(f"[FLIP] WARNING: return move failed: {e}")
+        try:
+            stepper.release()
+        except:
+            pass
+        time.sleep(0.10)
+
     return current_pos
 
 # =========================
@@ -375,13 +401,19 @@ def main():
     # ===== Auto feeder runtime state =====
     last_feed_time = 0.0
     empty_streak = 0
-    feed_motor_toggle = 1   # alternate M1/M2
+    feed_motor_toggle = 1
     block_until = 0.0
 
     # ===== Auto flip runtime state =====
     last_flip_time = 0.0
     decision_streak = 0
-    last_decision = None  # "BEAN"/"ROCK"/None
+    last_decision = None
+
+    # ===== NEW gating state =====
+    cv_gate_until = 0.0                 # before this time, ignore CV decision logic
+    present_streak = 0                  # consecutive frames "object present"
+    waiting_clear = False               # after flip, require clear before next flip
+    clear_streak = 0
 
     bg_gray = None
     try:
@@ -418,6 +450,8 @@ def main():
             rocks_count = 0
             decision = None
 
+            now = time.time()
+
             if bg_gray is None:
                 cv2.putText(full_bgr, "Press 'b' for BACKGROUND", (20, 50),
                             cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
@@ -426,6 +460,26 @@ def main():
                 mask_area = int(cv2.countNonZero(mask))
                 contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+                # -------- CV Gate logic (noise killer) --------
+                # only allow "decision for flip" when:
+                # 1) we are past cv_gate_until
+                # 2) if DETECT_ONLY_AFTER_FEED, we are within detect window after last feed
+                allow_decision = (now >= cv_gate_until)
+                if DETECT_ONLY_AFTER_FEED:
+                    allow_decision = allow_decision and ((now - last_feed_time) <= DETECT_WINDOW_AFTER_FEED_SEC)
+
+                # determine "object present" with stable frames
+                if now < cv_gate_until:
+                    present_streak = 0
+                else:
+                    if mask_area > CLEAR_BEFORE_FLIP_THRESH:
+                        present_streak += 1
+                    else:
+                        present_streak = 0
+
+                object_present = (present_streak >= PRESENT_STABLE_FRAMES)
+
+                # ---- run model prediction (visualization always ok) ----
                 feature_list = []
                 coords = []
 
@@ -457,7 +511,6 @@ def main():
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
                 # ---------- DECISION (for auto flip) ----------
-                # Rock wins if both present (matches your project rule)
                 if ROCK_WINS_IF_BOTH and rocks_count > 0:
                     decision = "ROCK"
                 elif beans_count > 0:
@@ -466,7 +519,6 @@ def main():
                     decision = None
 
                 # ===== AUTO FEED =====
-                now = time.time()
                 if feeder1 is not None and feeder2 is not None:
                     if now < block_until:
                         empty_streak = 0
@@ -494,14 +546,34 @@ def main():
                             feeder.step_n(DOSE_STEPS)
 
                             last_feed_time = time.time()
+
+                            # NEW: after feed, gate CV for a bit (wait settle)
+                            cv_gate_until = last_feed_time + CV_GATE_AFTER_FEED_SEC
+                            present_streak = 0
+                            decision_streak = 0
+                            last_decision = None
+
                             empty_streak = 0
                             block_until = last_feed_time + POST_FEED_SETTLE_SEC
 
                 # ===== AUTO FLIP =====
-                now = time.time()
-                if AUTO_FLIP_ENABLED and (stepper is not None):
-                    # Require "object present" (mask_area high enough) to avoid flipping on noise
-                    if decision is not None and mask_area > CLEAR_BEFORE_FLIP_THRESH:
+                # Safety: if waiting_clear, we ignore decision until ROI is clear stable
+                if WAIT_CLEAR_AFTER_FLIP and waiting_clear:
+                    if mask_area < CLEAR_AFTER_FLIP_THRESH:
+                        clear_streak += 1
+                    else:
+                        clear_streak = 0
+
+                    if clear_streak >= CLEAR_STABLE_FRAMES:
+                        waiting_clear = False
+                        clear_streak = 0
+                        # after clear, allow new cycle (but still respect detect window / cooldown)
+                        decision_streak = 0
+                        last_decision = None
+
+                if AUTO_FLIP_ENABLED and (stepper is not None) and (not waiting_clear):
+                    # Only accept decision if gated + object present
+                    if allow_decision and object_present and (decision is not None):
                         if decision == last_decision:
                             decision_streak += 1
                         else:
@@ -514,27 +586,36 @@ def main():
                     if (decision_streak >= FLIP_STABLE_FRAMES and
                         (now - last_flip_time) >= FLIP_COOLDOWN_SEC):
 
-                        if last_decision == "BEAN":
-                            flip_dir = FLIP_DIR_FOR_BEAN
-                        else:
-                            flip_dir = FLIP_DIR_FOR_ROCK
+                        flip_dir = FLIP_DIR_FOR_BEAN if last_decision == "BEAN" else FLIP_DIR_FOR_ROCK
 
                         print(f"[AUTO FLIP] decision={last_decision} dir={flip_dir}")
+                        # During flip, temporarily gate CV to avoid noise causing immediate re-trigger
+                        cv_gate_until = time.time() + 0.45
+
                         stepper_pos = run_flip(stepper, stepper_pos, direction=flip_dir)
                         last_flip_time = time.time()
                         decision_streak = 0
                         last_decision = None
+                        present_streak = 0
 
-                        # after flip, ignore empty detection briefly (prevents immediate auto feed / reflip)
+                        # after flip: require clear before next flip (strong anti-noise)
+                        if WAIT_CLEAR_AFTER_FLIP:
+                            waiting_clear = True
+                            clear_streak = 0
+
+                        # keep your original block (prevents immediate auto feed/reflip)
                         block_until = max(block_until, last_flip_time + 0.35)
 
                 header = (
                     f"Beans:{beans_count} Rocks:{rocks_count} | mask:{mask_area} "
                     f"| empty:{empty_streak}/{EMPTY_FRAMES} AUTO_FEED:{'ON' if AUTO_FEED_ENABLED else 'OFF'} "
-                    f"| decision:{decision or 'NONE'} streak:{decision_streak}/{FLIP_STABLE_FRAMES} AUTO_FLIP:{'ON' if AUTO_FLIP_ENABLED else 'OFF'}"
+                    f"| decision:{decision or 'NONE'} streak:{decision_streak}/{FLIP_STABLE_FRAMES} AUTO_FLIP:{'ON' if AUTO_FLIP_ENABLED else 'OFF'} "
+                    f"| gate:{max(0.0, cv_gate_until-now):.2f}s present:{present_streak}/{PRESENT_STABLE_FRAMES} "
+                    f"| afterFeedWin:{'YES' if ((now-last_feed_time)<=DETECT_WINDOW_AFTER_FEED_SEC) else 'NO'} "
+                    f"| waitClear:{'YES' if waiting_clear else 'NO'} clear:{clear_streak}/{CLEAR_STABLE_FRAMES}"
                 )
                 cv2.putText(full_bgr, header, (20, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
 
                 cv2.imshow("Mask", mask)
 
@@ -550,28 +631,39 @@ def main():
                 print("Capturing background...")
                 bg_gray = capture_background_gray(picam2, roi_rect)
                 print("Background captured.")
-                # prevent instant feed/flip on first frame
                 t = time.time()
                 last_feed_time = t
                 last_flip_time = t
                 empty_streak = 0
                 decision_streak = 0
                 last_decision = None
+                present_streak = 0
+                waiting_clear = False
+                clear_streak = 0
+                cv_gate_until = t + POST_FEED_SETTLE_SEC
                 block_until = t + POST_FEED_SETTLE_SEC
 
             elif key == ord('r'):
                 if stepper is None:
                     print("Flipper not initialized.")
                     continue
+                cv_gate_until = time.time() + 0.45
                 stepper_pos = run_flip(stepper, stepper_pos, direction=+1)
                 print("Manual flip right and returned.")
+                if WAIT_CLEAR_AFTER_FLIP:
+                    waiting_clear = True
+                    clear_streak = 0
 
             elif key == ord('l'):
                 if stepper is None:
                     print("Flipper not initialized.")
                     continue
+                cv_gate_until = time.time() + 0.45
                 stepper_pos = run_flip(stepper, stepper_pos, direction=-1)
                 print("Manual flip left and returned.")
+                if WAIT_CLEAR_AFTER_FLIP:
+                    waiting_clear = True
+                    clear_streak = 0
 
             elif key == ord('1'):
                 if feeder1 is None:
@@ -584,6 +676,12 @@ def main():
                 empty_streak = 0
                 block_until = last_feed_time + POST_FEED_SETTLE_SEC
 
+                # NEW: gate CV after manual feed too
+                cv_gate_until = last_feed_time + CV_GATE_AFTER_FEED_SEC
+                present_streak = 0
+                decision_streak = 0
+                last_decision = None
+
             elif key == ord('2'):
                 if feeder2 is None:
                     print("Feeder 2 not initialized.")
@@ -594,6 +692,12 @@ def main():
                 last_feed_time = time.time()
                 empty_streak = 0
                 block_until = last_feed_time + POST_FEED_SETTLE_SEC
+
+                # NEW: gate CV after manual feed too
+                cv_gate_until = last_feed_time + CV_GATE_AFTER_FEED_SEC
+                present_streak = 0
+                decision_streak = 0
+                last_decision = None
 
             elif key == ord('a'):
                 AUTO_FEED_ENABLED = not AUTO_FEED_ENABLED
