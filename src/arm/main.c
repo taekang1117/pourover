@@ -22,6 +22,7 @@ enum RobotState {
   STATE_5,
   STATE_6,
   STATE_7,
+  STATE_8,
   DONE
 };
 
@@ -112,8 +113,7 @@ void runState3() {
 
 void runState4() {
   Serial.println("[STATE 4] Servo 1 & 2 → 90 back to 0 degrees");
-  sweepTwoServos(servoChannels[1], servoChannels[2], 90, 0);
-  delay(1500);
+  
 
   sweepServo(servoChannels[0], 45, 0);
   delay(1500);
@@ -126,13 +126,19 @@ void runState5() {
 }
 
 void runState6() {
-  Serial.println("[STATE 6] Servo 0 → 0 back to 180 degrees");
-  sweepServo(servoChannels[0], 0, 180);
+  Serial.println("[STATE 6] Servo 2 → 0 back to 180 degrees");
+  sweepTwoServos(servoChannels[1], servoChannels[2], 90, 0);//drag
   delay(1500);
 }
 
 void runState7() {
-  Serial.println("[STATE 7] Servo 4 → 0 back to 90 degrees");
+  Serial.println("[STATE 7] Servo 0 → 0 back to 180 degrees");
+  sweepServo(servoChannels[0], 0, 180);
+  delay(1500);
+}
+
+void runState8() {
+  Serial.println("[STATE 8] Servo 4 → 0 back to 90 degrees");
   sweepServo(servoChannels[4], 0, 180);
   delay(1500);
 }
@@ -202,6 +208,10 @@ void loop() {
 
     case STATE_7:
       runState7();
+      currentState = STATE_8;
+      break;
+    case STATE_8:
+      runState8();
       currentState = DONE;
       break;
 
