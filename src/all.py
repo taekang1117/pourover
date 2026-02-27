@@ -78,25 +78,33 @@ EMPTY_FRAMES = 10
 # Auto Flip Control
 # =========================
 AUTO_FLIP_ENABLED = True
-FLIP_STABLE_FRAMES = 1      # require stable detection before flipping
-FLIP_COOLDOWN_SEC = 1.0     # minimum time between flips (avoid spam)
-CLEAR_BEFORE_FLIP_THRESH = 600  # optional: require "object present" threshold; uses mask_area
-ROCK_WINS_IF_BOTH = True    # if both detected, treat as ROCK
+FLIP_STABLE_FRAMES = 1
+FLIP_COOLDOWN_SEC = 1.0
+CLEAR_BEFORE_FLIP_THRESH = 600
+ROCK_WINS_IF_BOTH = True
 
 FLIP_DIR_FOR_BEAN = -1
 FLIP_DIR_FOR_ROCK = +1
 
 # =========================
-# NEW: CV Gate / Anti-noise Sequencing
+# CV Gate / Anti-noise Sequencing
 # =========================
-DETECT_ONLY_AFTER_FEED = True          # 你要的：feeder 後才開始 pick up object
-CV_GATE_AFTER_FEED_SEC = 0.35          # feed後先忽略CV (震動/模糊/亮度變動)
-DETECT_WINDOW_AFTER_FEED_SEC = 2.8     # 只在 feed 後這段時間內允許做「翻盤決策」
-PRESENT_STABLE_FRAMES = 4              # 連續幾幀 mask_area 都夠大才算真的有物體 (壓 noise)
+DETECT_ONLY_AFTER_FEED = True
+CV_GATE_AFTER_FEED_SEC = 0.35
+DETECT_WINDOW_AFTER_FEED_SEC = 2.8
+PRESENT_STABLE_FRAMES = 4
 
 WAIT_CLEAR_AFTER_FLIP = True
-CLEAR_AFTER_FLIP_THRESH = 450          # flip後判定「清空」的閾值(比present低一點比較穩)
-CLEAR_STABLE_FRAMES = 6                # 連續幾幀清空才允許下一次 flip
+CLEAR_AFTER_FLIP_THRESH = 450
+CLEAR_STABLE_FRAMES = 6
+
+# =========================
+# NEW: WAIT_CLEAR timeout + nudge (prevents “stuck forever”)
+# =========================
+CLEAR_TIMEOUT_SEC = 2.0          # if not cleared after this, do a nudge / unlock
+CLEAR_RETRY_MAX = 2              # number of nudges before unlocking
+CLEAR_NUDGE_STEPS = 120          # small shake steps (not full 135 deg)
+CLEAR_NUDGE_WAIT_SEC = 0.15      # pause between nudge out/back
 
 # =========================
 # Feature columns used by train_model.py (16-feature model).
@@ -331,7 +339,6 @@ def run_flip(stepper, current_pos, direction):
         current_pos = move_to(stepper, target_pos, current_pos)
         time.sleep(RETURN_WAIT_SEC)
     finally:
-        # Always try to go back
         try:
             current_pos = move_to(stepper, start_pos, current_pos)
         except Exception as e:
@@ -343,6 +350,25 @@ def run_flip(stepper, current_pos, direction):
         time.sleep(0.10)
 
     return current_pos
+
+def nudge_flipper(stepper, stepper_pos, nudge_dir):
+    """
+    Small shake to help stuck objects clear. Returns updated stepper_pos.
+    """
+    if stepper is None:
+        return stepper_pos
+    start = stepper_pos
+    target = start + (CLEAR_NUDGE_STEPS if nudge_dir > 0 else -CLEAR_NUDGE_STEPS)
+    try:
+        stepper_pos = move_to(stepper, target, stepper_pos)
+        time.sleep(CLEAR_NUDGE_WAIT_SEC)
+    finally:
+        stepper_pos = move_to(stepper, start, stepper_pos)
+        try:
+            stepper.release()
+        except:
+            pass
+    return stepper_pos
 
 # =========================
 # Main
@@ -409,11 +435,17 @@ def main():
     decision_streak = 0
     last_decision = None
 
-    # ===== NEW gating state =====
-    cv_gate_until = 0.0                 # before this time, ignore CV decision logic
-    present_streak = 0                  # consecutive frames "object present"
-    waiting_clear = False               # after flip, require clear before next flip
+    # ===== gating state =====
+    cv_gate_until = 0.0
+    present_streak = 0
+
+    waiting_clear = False
     clear_streak = 0
+
+    # NEW: wait_clear timeout state
+    clear_wait_start = 0.0
+    clear_retry_count = 0
+    last_flip_dir = +1  # remember last flip direction for nudges
 
     bg_gray = None
     try:
@@ -460,10 +492,7 @@ def main():
                 mask_area = int(cv2.countNonZero(mask))
                 contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-                # -------- CV Gate logic (noise killer) --------
-                # only allow "decision for flip" when:
-                # 1) we are past cv_gate_until
-                # 2) if DETECT_ONLY_AFTER_FEED, we are within detect window after last feed
+                # -------- CV Gate logic --------
                 allow_decision = (now >= cv_gate_until)
                 if DETECT_ONLY_AFTER_FEED:
                     allow_decision = allow_decision and ((now - last_feed_time) <= DETECT_WINDOW_AFTER_FEED_SEC)
@@ -479,7 +508,7 @@ def main():
 
                 object_present = (present_streak >= PRESENT_STABLE_FRAMES)
 
-                # ---- run model prediction (visualization always ok) ----
+                # ---- run model prediction ----
                 feature_list = []
                 coords = []
 
@@ -510,7 +539,7 @@ def main():
                         cv2.putText(vis_roi, text, (x, y - 5),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
-                # ---------- DECISION (for auto flip) ----------
+                # ---------- DECISION ----------
                 if ROCK_WINS_IF_BOTH and rocks_count > 0:
                     decision = "ROCK"
                 elif beans_count > 0:
@@ -547,7 +576,7 @@ def main():
 
                             last_feed_time = time.time()
 
-                            # NEW: after feed, gate CV for a bit (wait settle)
+                            # after feed, gate CV for a bit (wait settle)
                             cv_gate_until = last_feed_time + CV_GATE_AFTER_FEED_SEC
                             present_streak = 0
                             decision_streak = 0
@@ -556,23 +585,44 @@ def main():
                             empty_streak = 0
                             block_until = last_feed_time + POST_FEED_SETTLE_SEC
 
-                # ===== AUTO FLIP =====
-                # Safety: if waiting_clear, we ignore decision until ROI is clear stable
+                # ===== WAIT_CLEAR (with timeout + nudge) =====
                 if WAIT_CLEAR_AFTER_FLIP and waiting_clear:
                     if mask_area < CLEAR_AFTER_FLIP_THRESH:
                         clear_streak += 1
                     else:
                         clear_streak = 0
 
+                    # cleared normally
                     if clear_streak >= CLEAR_STABLE_FRAMES:
                         waiting_clear = False
                         clear_streak = 0
-                        # after clear, allow new cycle (but still respect detect window / cooldown)
                         decision_streak = 0
                         last_decision = None
+                        clear_retry_count = 0
 
+                    else:
+                        # timeout -> nudge / unlock
+                        if (time.time() - clear_wait_start) >= CLEAR_TIMEOUT_SEC:
+                            if (stepper is not None) and (clear_retry_count < CLEAR_RETRY_MAX):
+                                clear_retry_count += 1
+                                print(f"[CLEAR TIMEOUT] NUDGE {clear_retry_count}/{CLEAR_RETRY_MAX} (mask={mask_area})")
+
+                                cv_gate_until = time.time() + 0.35  # ignore CV during shake
+                                stepper_pos = nudge_flipper(stepper, stepper_pos, nudge_dir=last_flip_dir)
+
+                                clear_wait_start = time.time()  # restart timer after nudge
+                                clear_streak = 0               # require fresh clear streak
+                            else:
+                                # give up waiting forever
+                                print(f"[CLEAR TIMEOUT] UNLOCK (mask={mask_area})")
+                                waiting_clear = False
+                                clear_streak = 0
+                                decision_streak = 0
+                                last_decision = None
+                                clear_retry_count = 0
+
+                # ===== AUTO FLIP =====
                 if AUTO_FLIP_ENABLED and (stepper is not None) and (not waiting_clear):
-                    # Only accept decision if gated + object present
                     if allow_decision and object_present and (decision is not None):
                         if decision == last_decision:
                             decision_streak += 1
@@ -587,9 +637,9 @@ def main():
                         (now - last_flip_time) >= FLIP_COOLDOWN_SEC):
 
                         flip_dir = FLIP_DIR_FOR_BEAN if last_decision == "BEAN" else FLIP_DIR_FOR_ROCK
+                        last_flip_dir = +1 if flip_dir > 0 else -1
 
                         print(f"[AUTO FLIP] decision={last_decision} dir={flip_dir}")
-                        # During flip, temporarily gate CV to avoid noise causing immediate re-trigger
                         cv_gate_until = time.time() + 0.45
 
                         stepper_pos = run_flip(stepper, stepper_pos, direction=flip_dir)
@@ -598,12 +648,12 @@ def main():
                         last_decision = None
                         present_streak = 0
 
-                        # after flip: require clear before next flip (strong anti-noise)
                         if WAIT_CLEAR_AFTER_FLIP:
                             waiting_clear = True
                             clear_streak = 0
+                            clear_wait_start = time.time()
+                            clear_retry_count = 0
 
-                        # keep your original block (prevents immediate auto feed/reflip)
                         block_until = max(block_until, last_flip_time + 0.35)
 
                 header = (
@@ -612,10 +662,11 @@ def main():
                     f"| decision:{decision or 'NONE'} streak:{decision_streak}/{FLIP_STABLE_FRAMES} AUTO_FLIP:{'ON' if AUTO_FLIP_ENABLED else 'OFF'} "
                     f"| gate:{max(0.0, cv_gate_until-now):.2f}s present:{present_streak}/{PRESENT_STABLE_FRAMES} "
                     f"| afterFeedWin:{'YES' if ((now-last_feed_time)<=DETECT_WINDOW_AFTER_FEED_SEC) else 'NO'} "
-                    f"| waitClear:{'YES' if waiting_clear else 'NO'} clear:{clear_streak}/{CLEAR_STABLE_FRAMES}"
+                    f"| waitClear:{'YES' if waiting_clear else 'NO'} clear:{clear_streak}/{CLEAR_STABLE_FRAMES} "
+                    f"| clearTO:{max(0.0, CLEAR_TIMEOUT_SEC-(time.time()-clear_wait_start)):.2f}s retry:{clear_retry_count}/{CLEAR_RETRY_MAX}"
                 )
                 cv2.putText(full_bgr, header, (20, 40),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 2)
 
                 cv2.imshow("Mask", mask)
 
@@ -638,8 +689,13 @@ def main():
                 decision_streak = 0
                 last_decision = None
                 present_streak = 0
+
                 waiting_clear = False
                 clear_streak = 0
+                clear_wait_start = 0.0
+                clear_retry_count = 0
+                last_flip_dir = +1
+
                 cv_gate_until = t + POST_FEED_SETTLE_SEC
                 block_until = t + POST_FEED_SETTLE_SEC
 
@@ -648,22 +704,28 @@ def main():
                     print("Flipper not initialized.")
                     continue
                 cv_gate_until = time.time() + 0.45
+                last_flip_dir = +1
                 stepper_pos = run_flip(stepper, stepper_pos, direction=+1)
                 print("Manual flip right and returned.")
                 if WAIT_CLEAR_AFTER_FLIP:
                     waiting_clear = True
                     clear_streak = 0
+                    clear_wait_start = time.time()
+                    clear_retry_count = 0
 
             elif key == ord('l'):
                 if stepper is None:
                     print("Flipper not initialized.")
                     continue
                 cv_gate_until = time.time() + 0.45
+                last_flip_dir = -1
                 stepper_pos = run_flip(stepper, stepper_pos, direction=-1)
                 print("Manual flip left and returned.")
                 if WAIT_CLEAR_AFTER_FLIP:
                     waiting_clear = True
                     clear_streak = 0
+                    clear_wait_start = time.time()
+                    clear_retry_count = 0
 
             elif key == ord('1'):
                 if feeder1 is None:
@@ -676,7 +738,6 @@ def main():
                 empty_streak = 0
                 block_until = last_feed_time + POST_FEED_SETTLE_SEC
 
-                # NEW: gate CV after manual feed too
                 cv_gate_until = last_feed_time + CV_GATE_AFTER_FEED_SEC
                 present_streak = 0
                 decision_streak = 0
@@ -693,7 +754,6 @@ def main():
                 empty_streak = 0
                 block_until = last_feed_time + POST_FEED_SETTLE_SEC
 
-                # NEW: gate CV after manual feed too
                 cv_gate_until = last_feed_time + CV_GATE_AFTER_FEED_SEC
                 present_streak = 0
                 decision_streak = 0
