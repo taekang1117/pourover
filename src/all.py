@@ -434,12 +434,14 @@ def main():
     # ===== Auto feeder runtime state =====
     last_feed_time = 0.0
     feed_started = False
+    feed_stall_start = 0.0
     empty_streak = 0
     feed_motor_toggle = 1
     block_until = 0.0
 
     # ===== Auto flip runtime state =====
     last_flip_time = 0.0
+    flip_armed = False
     decision_streak = 0
     last_decision = None
 
@@ -582,6 +584,7 @@ def main():
 
                             last_feed_time = time.time()
                             feed_started = True
+                            flip_armed = True
 
                             # after feed, gate CV for a bit (wait settle)
                             cv_gate_until = last_feed_time + CV_GATE_AFTER_FEED_SEC
@@ -591,35 +594,6 @@ def main():
 
                             empty_streak = 0
                             block_until = last_feed_time + POST_FEED_SETTLE_SEC
-
-                if (feeder1 is not None and feeder2 is not None and
-                    AUTO_FEED_ENABLED and feed_started and
-                    (now - last_feed_time) >= FEED_TIMEOUT_SEC):
-
-                    if feed_motor_toggle == 1:
-                        feeder = feeder1
-                        motor_name = "M1"
-                        feed_motor_toggle = 2
-                    else:
-                        feeder = feeder2
-                        motor_name = "M2"
-                        feed_motor_toggle = 1
-
-                    print(f"[FEED TIMEOUT] No feeder rotation for {FEED_TIMEOUT_SEC:.1f}s. Forcing {motor_name} dose and clearing stuck state.")
-                    waiting_clear = False
-                    clear_streak = 0
-                    clear_wait_start = 0.0
-                    clear_retry_count = 0
-                    present_streak = 0
-                    decision_streak = 0
-                    last_decision = None
-                    empty_streak = 0
-
-                    run_feeder_dose(feeder, motor_name)
-
-                    last_feed_time = time.time()
-                    cv_gate_until = last_feed_time + CV_GATE_AFTER_FEED_SEC
-                    block_until = last_feed_time + POST_FEED_SETTLE_SEC
 
                 # ===== WAIT_CLEAR (with timeout + nudge) =====
                 if WAIT_CLEAR_AFTER_FLIP and waiting_clear:
@@ -657,8 +631,52 @@ def main():
                                 last_decision = None
                                 clear_retry_count = 0
 
+                feeder_stalled = (
+                    AUTO_FEED_ENABLED and
+                    feed_started and
+                    waiting_clear and
+                    mask_area >= CLEAR_AFTER_FLIP_THRESH
+                )
+
+                if feeder_stalled:
+                    if feed_stall_start == 0.0:
+                        feed_stall_start = now
+                else:
+                    feed_stall_start = 0.0
+
+                if (feeder1 is not None and feeder2 is not None and
+                    feed_stall_start > 0.0 and
+                    (now - feed_stall_start) >= FEED_TIMEOUT_SEC):
+
+                    if feed_motor_toggle == 1:
+                        feeder = feeder1
+                        motor_name = "M1"
+                        feed_motor_toggle = 2
+                    else:
+                        feeder = feeder2
+                        motor_name = "M2"
+                        feed_motor_toggle = 1
+
+                    print(f"[FEED TIMEOUT] WAIT_CLEAR stuck for {FEED_TIMEOUT_SEC:.1f}s. Forcing {motor_name} dose and clearing stuck state.")
+                    waiting_clear = False
+                    clear_streak = 0
+                    clear_wait_start = 0.0
+                    clear_retry_count = 0
+                    present_streak = 0
+                    decision_streak = 0
+                    last_decision = None
+                    empty_streak = 0
+                    feed_stall_start = 0.0
+
+                    run_feeder_dose(feeder, motor_name)
+
+                    last_feed_time = time.time()
+                    flip_armed = True
+                    cv_gate_until = last_feed_time + CV_GATE_AFTER_FEED_SEC
+                    block_until = last_feed_time + POST_FEED_SETTLE_SEC
+
                 # ===== AUTO FLIP =====
-                if AUTO_FLIP_ENABLED and (stepper is not None) and (not waiting_clear):
+                if AUTO_FLIP_ENABLED and (stepper is not None) and flip_armed and (not waiting_clear):
                     if allow_decision and object_present and (decision is not None):
                         if decision == last_decision:
                             decision_streak += 1
@@ -677,6 +695,7 @@ def main():
 
                         print(f"[AUTO FLIP] decision={last_decision} dir={flip_dir}")
                         cv_gate_until = time.time() + 0.45
+                        flip_armed = False
 
                         stepper_pos = run_flip(stepper, stepper_pos, direction=flip_dir)
                         last_flip_time = time.time()
@@ -721,6 +740,8 @@ def main():
                 t = time.time()
                 last_feed_time = t
                 feed_started = False
+                flip_armed = False
+                feed_stall_start = 0.0
                 last_flip_time = t
                 empty_streak = 0
                 decision_streak = 0
@@ -772,6 +793,8 @@ def main():
                 run_feeder_dose(feeder1, "M1")
                 last_feed_time = time.time()
                 feed_started = True
+                flip_armed = True
+                feed_stall_start = 0.0
                 empty_streak = 0
                 block_until = last_feed_time + POST_FEED_SETTLE_SEC
 
@@ -788,6 +811,8 @@ def main():
                 run_feeder_dose(feeder2, "M2")
                 last_feed_time = time.time()
                 feed_started = True
+                flip_armed = True
+                feed_stall_start = 0.0
                 empty_streak = 0
                 block_until = last_feed_time + POST_FEED_SETTLE_SEC
 
