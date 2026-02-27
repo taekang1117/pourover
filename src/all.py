@@ -127,7 +127,8 @@ FLIP_IN3 = 13
 FLIP_IN4 = 19
 
 FLIP_STEP_DELAY = 0.0018
-STEPS_135_DEG = 768
+STEPS_135_DEG = 1000
+# Try 1000. Originally it was 768
 RETURN_WAIT_SEC = 0.5
 
 # =========================
