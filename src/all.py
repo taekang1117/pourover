@@ -372,6 +372,22 @@ def nudge_flipper(stepper, stepper_pos, nudge_dir):
             pass
     return stepper_pos
 
+def recenter_flipper(stepper, stepper_pos):
+    """
+    Force the flipper back to home before resuming normal operation.
+    """
+    if stepper is None:
+        return stepper_pos
+    try:
+        stepper_pos = move_to(stepper, 0, stepper_pos)
+    except Exception as e:
+        print(f"[FLIP] WARNING: recenter failed: {e}")
+    try:
+        stepper.release()
+    except:
+        pass
+    return stepper_pos
+
 def run_feeder_dose(feeder, motor_name):
     print(f"[AUTO FEED] {motor_name} dose (DOSE_STEPS={DOSE_STEPS})")
     feeder.set_dir(True)
@@ -625,6 +641,7 @@ def main():
                             else:
                                 # give up waiting forever
                                 print(f"[CLEAR TIMEOUT] UNLOCK (mask={mask_area})")
+                                stepper_pos = recenter_flipper(stepper, stepper_pos)
                                 waiting_clear = False
                                 clear_streak = 0
                                 decision_streak = 0
@@ -658,6 +675,7 @@ def main():
                         feed_motor_toggle = 1
 
                     print(f"[FEED TIMEOUT] WAIT_CLEAR stuck for {FEED_TIMEOUT_SEC:.1f}s. Forcing {motor_name} dose and clearing stuck state.")
+                    stepper_pos = recenter_flipper(stepper, stepper_pos)
                     waiting_clear = False
                     clear_streak = 0
                     clear_wait_start = 0.0
