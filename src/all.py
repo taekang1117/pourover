@@ -54,8 +54,6 @@ MODEL_FILE = "bean_model.pkl"
 # =========================
 M1_STEP = 17
 M1_DIR  = 27
-M2_STEP = 22
-M2_DIR  = 23
 
 STEP_PULSE_US  = 20
 STEP_GAP_US    = 1000
@@ -63,7 +61,6 @@ DIR_SETTLE_SEC = 0.05
 DOSE_STEPS = 300
 
 M1_DIR_NORMAL = True
-M2_DIR_NORMAL = True
 
 # =========================
 # Auto Feeder Control (slow, safe)
@@ -388,8 +385,8 @@ def recenter_flipper(stepper, stepper_pos):
         pass
     return stepper_pos
 
-def run_feeder_dose(feeder, motor_name):
-    print(f"[AUTO FEED] {motor_name} dose (DOSE_STEPS={DOSE_STEPS})")
+def run_feeder_dose(feeder):
+    print(f"[AUTO FEED] M1 dose (DOSE_STEPS={DOSE_STEPS})")
     feeder.set_dir(True)
     feeder.step_n(DOSE_STEPS)
 
@@ -415,17 +412,15 @@ def main():
         GPIO.setmode(GPIO.BCM)
         GPIO.setwarnings(False)
 
-        for p in [M1_STEP, M1_DIR, M2_STEP, M2_DIR]:
+        for p in [M1_STEP, M1_DIR]:
             GPIO.setup(p, GPIO.OUT)
             GPIO.output(p, GPIO.LOW)
 
         feeder1 = StepperTMC2209_EN_GND(M1_STEP, M1_DIR, dir_normal=M1_DIR_NORMAL, name="M1")
-        feeder2 = StepperTMC2209_EN_GND(M2_STEP, M2_DIR, dir_normal=M2_DIR_NORMAL, name="M2")
         print("Feeder steppers initialized (EN hard-grounded).")
         print(f"Feeder timing: PULSE={STEP_PULSE_US}us GAP={STEP_GAP_US}us DOSE_STEPS={DOSE_STEPS}")
     except Exception as exc:
         feeder1 = None
-        feeder2 = None
         print(f"Feeder steppers unavailable: {exc}")
         print("Continuing without feeder controls.")
 
@@ -452,7 +447,6 @@ def main():
     feed_started = False
     feed_stall_start = 0.0
     empty_streak = 0
-    feed_motor_toggle = 1
     block_until = 0.0
 
     # ===== Auto flip runtime state =====
@@ -488,10 +482,9 @@ def main():
         print("Inference Mode (AUTO feeders + AUTO flip)")
         print("Keys:")
         print("  b: Capture Background")
-        print("  1/2: Manual dose feeder 1/2")
+        print("  1: Manual dose feeder")
         print("  a: Toggle AUTO feeder ON/OFF")
         print("  z: Toggle AUTO flip ON/OFF")
-        print("  m: Switch next AUTO feeder (M1<->M2)")
         print("  r/l: Manual flip right/left (debug)")
         print("  q: Quit")
 
@@ -574,7 +567,7 @@ def main():
                     decision = None
 
                 # ===== AUTO FEED =====
-                if feeder1 is not None and feeder2 is not None:
+                if feeder1 is not None:
                     if now < block_until:
                         empty_streak = 0
                     else:
@@ -586,17 +579,7 @@ def main():
                         if (AUTO_FEED_ENABLED and
                             empty_streak >= EMPTY_FRAMES and
                             (now - last_feed_time) >= FEED_COOLDOWN_SEC):
-
-                            if feed_motor_toggle == 1:
-                                feeder = feeder1
-                                motor_name = "M1"
-                                feed_motor_toggle = 2
-                            else:
-                                feeder = feeder2
-                                motor_name = "M2"
-                                feed_motor_toggle = 1
-
-                            run_feeder_dose(feeder, motor_name)
+                            run_feeder_dose(feeder1)
 
                             last_feed_time = time.time()
                             feed_started = True
@@ -661,20 +644,11 @@ def main():
                 else:
                     feed_stall_start = 0.0
 
-                if (feeder1 is not None and feeder2 is not None and
+                if (feeder1 is not None and
                     feed_stall_start > 0.0 and
                     (now - feed_stall_start) >= FEED_TIMEOUT_SEC):
 
-                    if feed_motor_toggle == 1:
-                        feeder = feeder1
-                        motor_name = "M1"
-                        feed_motor_toggle = 2
-                    else:
-                        feeder = feeder2
-                        motor_name = "M2"
-                        feed_motor_toggle = 1
-
-                    print(f"[FEED TIMEOUT] WAIT_CLEAR stuck for {FEED_TIMEOUT_SEC:.1f}s. Forcing {motor_name} dose and clearing stuck state.")
+                    print(f"[FEED TIMEOUT] WAIT_CLEAR stuck for {FEED_TIMEOUT_SEC:.1f}s. Forcing M1 dose and clearing stuck state.")
                     stepper_pos = recenter_flipper(stepper, stepper_pos)
                     waiting_clear = False
                     clear_streak = 0
@@ -686,7 +660,7 @@ def main():
                     empty_streak = 0
                     feed_stall_start = 0.0
 
-                    run_feeder_dose(feeder, motor_name)
+                    run_feeder_dose(feeder1)
 
                     last_feed_time = time.time()
                     flip_armed = True
@@ -821,24 +795,6 @@ def main():
                 decision_streak = 0
                 last_decision = None
 
-            elif key == ord('2'):
-                if feeder2 is None:
-                    print("Feeder 2 not initialized.")
-                    continue
-                print("[MANUAL FEED] M2 dose")
-                run_feeder_dose(feeder2, "M2")
-                last_feed_time = time.time()
-                feed_started = True
-                flip_armed = True
-                feed_stall_start = 0.0
-                empty_streak = 0
-                block_until = last_feed_time + POST_FEED_SETTLE_SEC
-
-                cv_gate_until = last_feed_time + CV_GATE_AFTER_FEED_SEC
-                present_streak = 0
-                decision_streak = 0
-                last_decision = None
-
             elif key == ord('a'):
                 AUTO_FEED_ENABLED = not AUTO_FEED_ENABLED
                 print(f"[MODE] AUTO_FEED_ENABLED -> {AUTO_FEED_ENABLED}")
@@ -846,10 +802,6 @@ def main():
             elif key == ord('z'):
                 AUTO_FLIP_ENABLED = not AUTO_FLIP_ENABLED
                 print(f"[MODE] AUTO_FLIP_ENABLED -> {AUTO_FLIP_ENABLED}")
-
-            elif key == ord('m'):
-                feed_motor_toggle = 2 if feed_motor_toggle == 1 else 1
-                print(f"[MODE] Next AUTO feeder -> {'M1' if feed_motor_toggle==1 else 'M2'}")
 
     finally:
         picam2.stop()
