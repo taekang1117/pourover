@@ -78,10 +78,10 @@ EMPTY_FRAMES = 10
 # Auto Flip Control
 # =========================
 AUTO_FLIP_ENABLED = True
-FLIP_STABLE_FRAMES = 6
-FLIP_COOLDOWN_SEC = 1.0
-CLEAR_BEFORE_FLIP_THRESH = 600
-ROCK_WINS_IF_BOTH = True
+FLIP_STABLE_FRAMES = 1      # require stable detection before flipping
+FLIP_COOLDOWN_SEC = 1.0     # minimum time between flips (avoid spam)
+CLEAR_BEFORE_FLIP_THRESH = 600  # optional: require "object present" threshold; uses mask_area
+ROCK_WINS_IF_BOTH = True    # if both detected, treat as ROCK
 
 FLIP_DIR_FOR_BEAN = -1
 FLIP_DIR_FOR_ROCK = +1
