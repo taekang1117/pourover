@@ -70,6 +70,7 @@ M2_DIR_NORMAL = True
 # =========================
 AUTO_FEED_ENABLED = True
 FEED_COOLDOWN_SEC = 1
+FEED_TIMEOUT_SEC = 3.0
 POST_FEED_SETTLE_SEC = 0.45
 EMPTY_MASK_THRESH = 500
 EMPTY_FRAMES = 10
@@ -371,6 +372,11 @@ def nudge_flipper(stepper, stepper_pos, nudge_dir):
             pass
     return stepper_pos
 
+def run_feeder_dose(feeder, motor_name):
+    print(f"[AUTO FEED] {motor_name} dose (DOSE_STEPS={DOSE_STEPS})")
+    feeder.set_dir(True)
+    feeder.step_n(DOSE_STEPS)
+
 # =========================
 # Main
 # =========================
@@ -427,6 +433,7 @@ def main():
 
     # ===== Auto feeder runtime state =====
     last_feed_time = 0.0
+    feed_started = False
     empty_streak = 0
     feed_motor_toggle = 1
     block_until = 0.0
@@ -571,11 +578,10 @@ def main():
                                 motor_name = "M2"
                                 feed_motor_toggle = 1
 
-                            print(f"[AUTO FEED] {motor_name} dose (DOSE_STEPS={DOSE_STEPS})")
-                            feeder.set_dir(True)
-                            feeder.step_n(DOSE_STEPS)
+                            run_feeder_dose(feeder, motor_name)
 
                             last_feed_time = time.time()
+                            feed_started = True
 
                             # after feed, gate CV for a bit (wait settle)
                             cv_gate_until = last_feed_time + CV_GATE_AFTER_FEED_SEC
@@ -585,6 +591,35 @@ def main():
 
                             empty_streak = 0
                             block_until = last_feed_time + POST_FEED_SETTLE_SEC
+
+                if (feeder1 is not None and feeder2 is not None and
+                    AUTO_FEED_ENABLED and feed_started and
+                    (now - last_feed_time) >= FEED_TIMEOUT_SEC):
+
+                    if feed_motor_toggle == 1:
+                        feeder = feeder1
+                        motor_name = "M1"
+                        feed_motor_toggle = 2
+                    else:
+                        feeder = feeder2
+                        motor_name = "M2"
+                        feed_motor_toggle = 1
+
+                    print(f"[FEED TIMEOUT] No feeder rotation for {FEED_TIMEOUT_SEC:.1f}s. Forcing {motor_name} dose and clearing stuck state.")
+                    waiting_clear = False
+                    clear_streak = 0
+                    clear_wait_start = 0.0
+                    clear_retry_count = 0
+                    present_streak = 0
+                    decision_streak = 0
+                    last_decision = None
+                    empty_streak = 0
+
+                    run_feeder_dose(feeder, motor_name)
+
+                    last_feed_time = time.time()
+                    cv_gate_until = last_feed_time + CV_GATE_AFTER_FEED_SEC
+                    block_until = last_feed_time + POST_FEED_SETTLE_SEC
 
                 # ===== WAIT_CLEAR (with timeout + nudge) =====
                 if WAIT_CLEAR_AFTER_FLIP and waiting_clear:
@@ -685,6 +720,7 @@ def main():
                 print("Background captured.")
                 t = time.time()
                 last_feed_time = t
+                feed_started = False
                 last_flip_time = t
                 empty_streak = 0
                 decision_streak = 0
@@ -733,9 +769,9 @@ def main():
                     print("Feeder 1 not initialized.")
                     continue
                 print("[MANUAL FEED] M1 dose")
-                feeder1.set_dir(True)
-                feeder1.step_n(DOSE_STEPS)
+                run_feeder_dose(feeder1, "M1")
                 last_feed_time = time.time()
+                feed_started = True
                 empty_streak = 0
                 block_until = last_feed_time + POST_FEED_SETTLE_SEC
 
@@ -749,9 +785,9 @@ def main():
                     print("Feeder 2 not initialized.")
                     continue
                 print("[MANUAL FEED] M2 dose")
-                feeder2.set_dir(True)
-                feeder2.step_n(DOSE_STEPS)
+                run_feeder_dose(feeder2, "M2")
                 last_feed_time = time.time()
+                feed_started = True
                 empty_streak = 0
                 block_until = last_feed_time + POST_FEED_SETTLE_SEC
 
