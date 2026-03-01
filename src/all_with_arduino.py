@@ -7,6 +7,7 @@ from picamera2 import Picamera2
 from rpi_ws281x import PixelStrip, Color
 import os
 import sys
+import re  # added: for parsing 'Weight: xx g' lines
 
 try:
     import serial
@@ -485,6 +486,8 @@ def poll_arduino_serial(ser, state):
                     if state.get("last_avg_weight_g") is None:
                         state["last_weight_g"] = w
                     state["last_weight_ts"] = time.time()
+                    # Fallback: treat live weight as "ready" to avoid pipeline timeout on older firmware
+                    state["weight_rdy"] = True
                 except ValueError:
                     pass
                 continue
