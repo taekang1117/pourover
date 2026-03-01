@@ -464,10 +464,28 @@ def poll_arduino_serial(ser, state):
 
             if s.startswith("WEIGHT_AVG,"):
                 try:
-                    state["last_weight_g"] = float(s.split(",", 1)[1])
+                    avg = float(s.split(",", 1)[1])
+                    state["last_avg_weight_g"] = avg
+                    state["last_weight_g"] = avg
+                    state["last_weight_ts"] = time.time()
                     # 兼容：即使没有单独的 WEIGHT_RDY，也认为数据已就绪
                     state["weight_rdy"] = True
                 except (ValueError, IndexError):
+                    pass
+                continue
+
+            # ---- live weight (backward compatible) ----
+            # Some firmwares stream: "Weight: 8.61 g"
+            m = re.search(r"Weight:\s*([-+]?\d*\.?\d+)\s*g", s, flags=re.IGNORECASE)
+            if m:
+                try:
+                    w = float(m.group(1))
+                    state["last_live_weight_g"] = w
+                    # If avg not provided yet, show live weight as fallback
+                    if state.get("last_avg_weight_g") is None:
+                        state["last_weight_g"] = w
+                    state["last_weight_ts"] = time.time()
+                except ValueError:
                     pass
                 continue
 
@@ -528,6 +546,9 @@ def main():
     arduino_ser = open_arduino_serial()
     arduino_state = {
         "last_weight_g": None,
+        "last_live_weight_g": None,
+        "last_avg_weight_g": None,
+        "last_weight_ts": 0.0,
         "weight_rdy": False,
         "await_weight": False,
         "weight_req_ts": 0.0,
@@ -540,8 +561,8 @@ def main():
 
     if arduino_ser is not None and ARDUINO_START_AFTER_PI_READY:
         try:
-            time.sleep(0.3)  # 给 Arduino 串口稳定时间
-            arduino_ser.write(b"g")
+            time.sleep(2.0)  # Arduino 打开串口通常会 reset，等待它启动完成
+            arduino_ser.write(b"g\n")
             arduino_ser.flush()
             print("[ARDUINO] Sent 'g' (start after Pi ready).")
             # 可选：等 READY 回复（短超时）
@@ -725,7 +746,7 @@ def main():
                             AUTO_FLIP_ENABLED = False
                             if arduino_ser is not None:
                                 try:
-                                    arduino_ser.write(b"a")
+                                    arduino_ser.write(b"a\n")
                                     arduino_ser.flush()
                                     print("[ARDUINO] Sent 'a' (arm may move).")
                                 except Exception as e:
@@ -871,7 +892,7 @@ def main():
                                 arduino_state["weight_rdy"] = False
                                 arduino_state["weight_req_ts"] = time.time()
 
-                                arduino_ser.write(b"r")
+                                arduino_ser.write(b"r\n")
                                 arduino_ser.flush()
                                 print("[ARDUINO] Sent 'r' (avg weight). Pausing pipeline until WEIGHT_RDY/WEIGHT_AVG.")
                             except Exception as e:
@@ -886,7 +907,15 @@ def main():
 
                         block_until = max(block_until, last_flip_time + 0.35)
 
-                w_str = f"W:{arduino_state['last_weight_g']:.1f}g" if arduino_state["last_weight_g"] is not None else "W:--"
+                avg_w = arduino_state.get('last_avg_weight_g', None)
+                live_w = arduino_state.get('last_live_weight_g', None)
+                if avg_w is not None:
+                    w_str = f"Wavg:{avg_w:.1f}g"
+                elif live_w is not None:
+                    w_str = f"W:{live_w:.1f}g"
+                else:
+                    w_str = "W:--"
+                t_str = f"T:{ARDUINO_WEIGHT_TARGET_G:.1f}g"
                 if arduino_state.get("target_reached", False):
                     phase_str = "TARGET:REACHED"
                 elif arduino_state.get("await_weight", False):
@@ -895,7 +924,7 @@ def main():
                     phase_str = "WEIGH:IDLE"
                 header = (
                     f"Beans:{beans_count} Rocks:{rocks_count} | mask:{mask_area} "
-                    f"| {w_str} {phase_str} | empty:{empty_streak}/{EMPTY_FRAMES} AUTO_FEED:{'ON' if AUTO_FEED_ENABLED else 'OFF'} "
+                    f"| {w_str}/{t_str} {phase_str} | empty:{empty_streak}/{EMPTY_FRAMES} AUTO_FEED:{'ON' if AUTO_FEED_ENABLED else 'OFF'} "
                     f"| decision:{decision or 'NONE'} streak:{decision_streak}/{FLIP_STABLE_FRAMES} AUTO_FLIP:{'ON' if AUTO_FLIP_ENABLED else 'OFF'} "
                     f"| gate:{max(0.0, cv_gate_until-now):.2f}s present:{present_streak}/{PRESENT_STABLE_FRAMES} "
                     f"| afterFeedWin:{'YES' if ((now-last_feed_time)<=DETECT_WINDOW_AFTER_FEED_SEC) else 'NO'} "
@@ -937,11 +966,7 @@ def main():
                 last_flip_dir = +1
 
                 arduino_state["last_weight_g"] = None
-                arduino_state["weight_rdy"] = False
-                arduino_state["await_weight"] = False
-                arduino_state["target_reached"] = False
-                arduino_state["arm_done"] = False
-                arduino_state["feeder_allowed_by_weight"] = True  # 兼容旧协议（不再作为主逻辑）
+                arduino_state["feeder_allowed_by_weight"] = True  # 新一批默认允许上料，等称重结果再更新
 
                 cv_gate_until = t + POST_FEED_SETTLE_SEC
                 block_until = t + POST_FEED_SETTLE_SEC
@@ -956,12 +981,9 @@ def main():
                 print("Manual flip right and returned.")
                 if arduino_ser is not None:
                     try:
-                        arduino_state["await_weight"] = True
-                        arduino_state["weight_rdy"] = False
-                        arduino_state["weight_req_ts"] = time.time()
-                        arduino_ser.write(b"r")
+                        arduino_ser.write(b"r\n")
                         arduino_ser.flush()
-                        print("[ARDUINO] Sent 'r' (avg weight). Pausing pipeline until WEIGHT_RDY/WEIGHT_AVG.")
+                        print("[ARDUINO] Sent 'r' (avg weight request).")
                     except Exception as e:
                         print(f"[ARDUINO] write 's' failed: {e}")
                 if WAIT_CLEAR_AFTER_FLIP:
@@ -980,12 +1002,9 @@ def main():
                 print("Manual flip left and returned.")
                 if arduino_ser is not None:
                     try:
-                        arduino_state["await_weight"] = True
-                        arduino_state["weight_rdy"] = False
-                        arduino_state["weight_req_ts"] = time.time()
-                        arduino_ser.write(b"r")
+                        arduino_ser.write(b"r\n")
                         arduino_ser.flush()
-                        print("[ARDUINO] Sent 'r' (avg weight). Pausing pipeline until WEIGHT_RDY/WEIGHT_AVG.")
+                        print("[ARDUINO] Sent 'r' (avg weight request).")
                     except Exception as e:
                         print(f"[ARDUINO] write 's' failed: {e}")
                 if WAIT_CLEAR_AFTER_FLIP:
