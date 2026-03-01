@@ -84,62 +84,66 @@ void sweepTwoServos(uint8_t ch1, uint8_t ch2, uint8_t startAngle, uint8_t endAng
 // NOTE: your INIT function print message didn’t match action.
 // I kept your *action* as written.
 void runINIT() {
-  Serial.println("[INIT] All servos → 0 degrees");
+  Serial.println("[INIT] All servos → 0 degrees (except servo 0 → 45°)");
 
   for (uint8_t i = 1; i < NUM_SERVOS; i++) {
     setServoAngle(servoChannels[i], 0);
   }
-  setServoAngle(servoChannels[0], 45);
+  setServoAngle(servoChannels[0], 45); //so gripper wont hit the basket.
   delay(1500);
 }
 
 void runState1() {
-  Serial.println("[STATE 1] Servo 1 & 2 → 0 to 90 degrees");
-  sweepTwoServos(servoChannels[1], servoChannels[2], 0, 90);
+  Serial.println("[STATE 1] Servo 1  → 0 to 90 degrees & Servo 2 → 0 to 110 degrees");
+  //basket position, need to be fixed.
+  sweepServo(servoChannels[1], 0, 90);
+  sweepServo(servoChannels[2], 0, 70);
+
   delay(1500);
 }
 
 void runState2() {
   Serial.println("[STATE 2] Servo 3 → 0 to 90 degrees");
-  sweepServo(servoChannels[3], 0, 90);
+  sweepServo(servoChannels[3], 0, 90); //rotate gripper
   delay(1500);
 }
 
 void runState3() {
-  Serial.println("[STATE 3] Servo 4 → 0 to 90 degrees");
-  sweepServo(servoChannels[4], 0, 180);
+  Serial.println("[STATE 3] Servo 4 → 0 to 180 degrees");
+  sweepServo(servoChannels[4], 0, 180); //open gripper
   delay(1500);
 }
 
 void runState4() {
-  Serial.println("[STATE 4] Servo 1 & 2 → 90 back to 0 degrees");
+  Serial.println("[STATE 4] Servo 0 → 45 to 0 degrees");
   
-
-  sweepServo(servoChannels[0], 45, 0);
+  sweepServo(servoChannels[0], 45, 0); //To basket's postion.
   delay(1500);
 }
 
 void runState5() {
-  Serial.println("[STATE 5] Servo 4 → 90 back to 0 degrees");
+  Serial.println("[STATE 5] Servo 4 → 180 back to 0 degrees");
   sweepServo(servoChannels[4], 180, 0);
   delay(1500);
 }
 
 void runState6() {
-  Serial.println("[STATE 6] Servo 2 → 0 back to 180 degrees");
-  sweepTwoServos(servoChannels[1], servoChannels[2], 90, 0);//drag
+  Serial.println("[STATE 6] Servo 2 → 0 back to 90 degrees");
+  //drag
+  sweepServo(servoChannels[1], 90, 0);
+  sweepServo(servoChannels[2], 70, 0);
   delay(1500);
 }
 
 void runState7() {
-  Serial.println("[STATE 7] Servo 0 → 0 back to 180 degrees");
-  sweepServo(servoChannels[0], 0, 180);
+  Serial.println("[STATE 7] Servo 0 → 0 back to 90 degrees");
+  sweepServo(servoChannels[0], 0, 90);// position for user
   delay(1500);
 }
 
 void runState8() {
   Serial.println("[STATE 8] Servo 4 → 0 back to 90 degrees");
-  sweepServo(servoChannels[4], 0, 180);
+  sweepServo(servoChannels[4], 0, 180);//open gripper for user to take the item.
   delay(1500);
 }
 
