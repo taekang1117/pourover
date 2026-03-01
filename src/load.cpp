@@ -36,7 +36,7 @@ void loop() {
   while (Serial.available() && Serial.peek() != '\n' && Serial.peek() != '\r')
     (void)Serial.read();
 
-  if (cmd == 't') {
+  if (cmd == 't' || cmd == 'b') {
     if (scale.wait_ready_timeout(1000)) {
       scale.tare(10);
       Serial.println("Tared.");

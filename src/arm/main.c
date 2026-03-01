@@ -61,22 +61,19 @@ void sweepServo(uint8_t channel, uint8_t startAngle, uint8_t endAngle) {
   setServoAngle(channel, endAngle);
 }
 
-void sweepTwoServos(uint8_t ch1, uint8_t ch2, uint8_t startAngle, uint8_t endAngle) {
-  if (startAngle < endAngle) {
-    for (int a = startAngle; a <= endAngle; a += SWEEP_STEP) {
-      setServoAngle(ch1, constrain(a, 0, 180));
-      setServoAngle(ch2, constrain(a, 0, 180));
-      delay(SWEEP_DELAY);
-    }
-  } else {
-    for (int a = startAngle; a >= endAngle; a -= SWEEP_STEP) {
-      setServoAngle(ch1, constrain(a, 0, 180));
-      setServoAngle(ch2, constrain(a, 0, 180));
-      delay(SWEEP_DELAY);
-    }
+void sweepTwoServos(uint8_t ch1, uint8_t ch2, uint8_t start1, uint8_t end1, uint8_t start2, uint8_t end2) {
+  int steps = max(abs(end1 - start1), abs(end2 - start2)) / SWEEP_STEP;
+  if (steps == 0) steps = 1;
+
+  for (int i = 0; i <= steps; i++) {
+    uint8_t a1 = map(i, 0, steps, start1, end1);
+    uint8_t a2 = map(i, 0, steps, start2, end2);
+    setServoAngle(ch1, a1);
+    setServoAngle(ch2, a2);
+    delay(SWEEP_DELAY);
   }
-  setServoAngle(ch1, endAngle);
-  setServoAngle(ch2, endAngle);
+  setServoAngle(ch1, end1);
+  setServoAngle(ch2, end2);
 }
 
 // ===== States =====
@@ -127,11 +124,12 @@ void runState5() {
   delay(1500);
 }
 
+// drag
 void runState6() {
-  Serial.println("[STATE 6] Servo 2 → 0 back to 90 degrees");
-  //drag
-  sweepServo(servoChannels[1], 90, 0);
-  sweepServo(servoChannels[2], 70, 0);
+  Serial.println("[STATE 6] Coordinated Drag: Servos 1 & 2 → 0 degrees");
+  // Coordinated drag pulls both joints simultaneously for more power/reach
+  // Starting from a slightly wider position (90, 70) and pulling to 0
+  sweepTwoServos(servoChannels[1], servoChannels[2], 90, 0, 70, 0);
   delay(1500);
 }
 

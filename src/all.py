@@ -7,6 +7,7 @@ from picamera2 import Picamera2
 from rpi_ws281x import PixelStrip, Color
 import os
 import sys
+import serial
 
 # =========================
 # WS2812 / NeoPixel Setup
@@ -128,6 +129,21 @@ FLIP_STEP_DELAY = 0.0018
 STEPS_135_DEG = 1000
 # Try 1000. Originally it was 768
 RETURN_WAIT_SEC = 0.5
+
+# =========================
+# Load Cell / Serial Setup
+# =========================
+SERIAL_PORT = "/dev/cu.usbmodem101"  # UPDATE THIS IF NEEDED
+SERIAL_BAUD = 115200
+
+def init_serial(port, baud):
+    try:
+        ser = serial.Serial(port, baud, timeout=0.1)
+        time.sleep(2)  # Wait for Arduino reset
+        return ser
+    except Exception as e:
+        print(f"Serial error: {e}")
+        return None
 
 # =========================
 # 12V Feeder Driver Class
@@ -432,6 +448,12 @@ def main():
     stepper_pos = 0
     set_max_white()
 
+    ser = init_serial(SERIAL_PORT, SERIAL_BAUD)
+    if ser:
+        print(f"Serial connected to {SERIAL_PORT}")
+    else:
+        print("Warning: Serial not connected. Load cell features disabled.")
+
     config = picam2.create_preview_configuration(main={"format": "RGB888", "size": (FRAME_W, FRAME_H)})
     picam2.configure(config)
     picam2.start()
@@ -715,6 +737,15 @@ def main():
                 cv2.putText(full_bgr, header, (20, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 2)
 
+                # --- Read Load Cell Weight ---
+                if ser:
+                    ser.write(b'r')
+                    line = ser.readline().decode('utf-8').strip()
+                    if line.startswith("Weight:"):
+                        print(f"[LOAD CELL] {line}")
+                        cv2.putText(full_bgr, line, (20, 70),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
                 cv2.imshow("Mask", mask)
 
             cv2.imshow("Review", full_bgr)
@@ -727,6 +758,9 @@ def main():
 
             elif key == ord('b'):
                 print("Capturing background...")
+                if ser:
+                    ser.write(b'b')
+                    print("Sent Tare command to load cell.")
                 bg_gray = capture_background_gray(picam2, roi_rect)
                 print("Background captured.")
                 t = time.time()
