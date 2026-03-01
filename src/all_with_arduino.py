@@ -8,6 +8,7 @@ from rpi_ws281x import PixelStrip, Color
 import os
 import sys
 import re  # added: for parsing 'Weight: xx g' lines
+import threading
 
 try:
     import serial
@@ -118,6 +119,7 @@ ARDUINO_BAUD = 115200
 ARDUINO_WEIGHT_TARGET_G = 20.0         # 与 LCWS_and_RA.cpp 中 WEIGHT_STOP_G 一致
 # True：all.py 启动后再发 'g' 给 Arduino，Arduino 收到后才响应称重/FEED；False：一上电就响应
 ARDUINO_START_AFTER_PI_READY = True
+ARDUINO_DEBUG_RAW = False            # True: 打印所有 Arduino 串口输出（调试）
 
 # =========================
 # Feature columns used by train_model.py (16-feature model).
@@ -407,20 +409,146 @@ def run_feeder_dose(feeder):
 
 
 def open_arduino_serial():
-    """打开 Arduino 串口，失败返回 None。"""
+    """打开 Arduino 串口，失败返回 None。（UART_LCWS 风格：较长 timeout + reset buffer）"""
     if serial is None:
         print("pyserial not installed. Arduino weight/feed signal disabled.")
         return None
     try:
-        ser = serial.Serial(ARDUINO_SERIAL_PORT, ARDUINO_BAUD, timeout=0.01)
-        print(f"Arduino serial opened: {ARDUINO_SERIAL_PORT} @ {ARDUINO_BAUD}")
+        # timeout 设稍大一点，readline 更容易拿到完整一行（避免 CV 主循环太忙导致分段/丢行）
+        ser = serial.Serial(ARDUINO_SERIAL_PORT, ARDUINO_BAUD, timeout=0.2)
+
+        # Arduino 打开串口通常会 reset，给它时间输出 banner
+        time.sleep(1.0)
+
+        # 清掉 banner（避免把启动日志当作业务消息）
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            pass
+
+        print(f"[OK] Opened serial: {ARDUINO_SERIAL_PORT} @ {ARDUINO_BAUD}")
         return ser
     except Exception as e:
         print(f"Arduino serial unavailable: {e}. Continuing without weight/feeder signal.")
         return None
 
 
+def _arduino_parse_line(s: str, state: dict):
+    """解析 Arduino 单行输出，更新 state。"""
+    if not s:
+        return
+
+    state["last_arduino_line"] = s
+
+    # ---- handshake ----
+    if s == "READY":
+        state["arduino_ready"] = True
+        return
+
+    # ---- weight protocol ----
+    if s == "WEIGHT_RDY":
+        state["weight_rdy"] = True
+        state["weight_err"] = False
+        state["last_arduino_msg"] = s
+        return
+
+    if s.startswith("WEIGHT_AVG,"):
+        try:
+            avg = float(s.split(",", 1)[1])
+            state["last_avg_weight_g"] = avg
+            state["last_weight_g"] = avg
+            state["last_weight_ts"] = time.time()
+            state["weight_rdy"] = True
+            state["weight_err"] = False
+            state["last_arduino_msg"] = "WEIGHT_AVG"
+        except (ValueError, IndexError):
+            pass
+        return
+
+    # ---- explicit errors ----
+    if s in ("NOT_READY", "WEIGHT_ERR"):
+        state["last_arduino_msg"] = s
+        if s == "WEIGHT_ERR":
+            state["weight_err"] = True
+        return
+
+    # ---- live weight (backward compatible) ----
+    # Some firmwares stream: "Weight: 8.61 g"
+    m = re.search(r"Weight:\s*([-+]?\d*\.?\d+)\s*g", s, flags=re.IGNORECASE)
+    if m:
+        try:
+            w = float(m.group(1))
+            state["last_live_weight_g"] = w
+            if state.get("last_avg_weight_g") is None:
+                state["last_weight_g"] = w
+            state["last_weight_ts"] = time.time()
+            # 兼容：把 live weight 也视作“就绪”，避免老固件一直 timeout
+            state["weight_rdy"] = True
+            state["weight_err"] = False
+            state["last_arduino_msg"] = "WEIGHT_LIVE"
+        except ValueError:
+            pass
+        return
+
+    # ---- arm done (optional) ----
+    if s in ("ARM_DONE", "DONE"):
+        state["arm_done"] = True
+        state["last_arduino_msg"] = s
+        return
+
+    # ---- backward compatible messages ----
+    if s == "FEED,0":
+        state["feeder_allowed_by_weight"] = False
+    elif s == "FEED,1":
+        state["feeder_allowed_by_weight"] = True
+
+
+def _arduino_reader_thread(ser, state: dict, debug_raw: bool = False):
+    """后台线程：持续 readline() 并解析（等价于 UART_LCWS 的 while True readline 结构）。"""
+    while ser is not None and getattr(ser, "is_open", False) and (not state.get("_rx_stop", False)):
+        try:
+            line = ser.readline()
+            if not line:
+                continue
+
+            try:
+                s = line.decode("utf-8", errors="ignore").strip()
+            except Exception:
+                continue
+
+            if debug_raw:
+                print(f"[ARDUINO<<] {s}")
+
+            _arduino_parse_line(s, state)
+
+        except Exception as e:
+            # 读线程报错：主循环会打印一次
+            state["arduino_error"] = str(e)
+            break
+
+
+def start_arduino_reader(ser, state: dict, debug_raw: bool = False):
+    """启动 Arduino 串口后台读取线程。"""
+    if ser is None:
+        return
+    if state.get("_rx_thread") is not None:
+        return
+    state["_rx_stop"] = False
+    t = threading.Thread(target=_arduino_reader_thread, args=(ser, state, debug_raw), daemon=True)
+    state["_rx_thread"] = t
+    t.start()
+
+
 def poll_arduino_serial(ser, state):
+    """兼容保留：串口读取由后台线程完成；这里只负责把读线程错误打印一次。"""
+    err = state.get("arduino_error", "")
+    if err and (not state.get("_arduino_err_printed", False)):
+        print(f"[ARDUINO] read error: {err}")
+        state["_arduino_err_printed"] = True
+    return
+
+
+
     """
     非阻塞读取串口，解析 Arduino → Pi 的消息并更新 state。
 
@@ -553,34 +681,48 @@ def main():
         "last_avg_weight_g": None,
         "last_weight_ts": 0.0,
         "weight_rdy": False,
+        "weight_err": False,
         "await_weight": False,
         "weight_req_ts": 0.0,
         "target_reached": False,
         "arduino_ready": False,
         "arm_done": False,
+
+        # debug / visibility
+        "last_arduino_line": "",
+        "last_arduino_msg": "",
+
+        # reader thread status
+        "arduino_error": "",
+        "_arduino_err_printed": False,
+        "_rx_thread": None,
+        "_rx_stop": False,
+
         # backward compatible key (旧协议，不再作为主逻辑)
         "feeder_allowed_by_weight": True,
     }
 
+    # ---- Arduino UART reader (UART_LCWS style) ----
+    if arduino_ser is not None:
+        start_arduino_reader(arduino_ser, arduino_state, debug_raw=ARDUINO_DEBUG_RAW)
+
     if arduino_ser is not None and ARDUINO_START_AFTER_PI_READY:
         try:
-            time.sleep(2.0)  # Arduino 打开串口通常会 reset，等待它启动完成
+            # 先发 'g'，Arduino 会回 READY；称重/机械臂命令要求 piReady=true
+            time.sleep(0.5)
             arduino_ser.write(b"g\n")
             arduino_ser.flush()
-            print("[ARDUINO] Sent 'g' (start after Pi ready).")
-            # 可选：等 READY 回复（短超时）
-            deadline = time.time() + 1.0
-            while time.time() < deadline:
-                if arduino_ser.in_waiting:
-                    line = arduino_ser.readline()
-                    try:
-                        s = line.decode("utf-8", errors="ignore").strip()
-                        if s == "READY":
-                            print("[ARDUINO] Arduino READY.")
-                            break
-                    except Exception:
-                        pass
+            print("[ARDUINO] Sent 'g' (start after Pi ready). Waiting READY...")
+
+            deadline = time.time() + 2.0
+            while time.time() < deadline and (not arduino_state.get("arduino_ready", False)):
                 time.sleep(0.02)
+
+            if arduino_state.get("arduino_ready", False):
+                print("[ARDUINO] Arduino READY.")
+            else:
+                # 不中断主流程，但会导致 Arduino 回 NOT_READY（届时会超时解锁）
+                print("[ARDUINO] WARNING: READY not received (continuing).")
         except Exception as e:
             print(f"[ARDUINO] Send 'g' failed: {e}")
 
@@ -727,6 +869,13 @@ def main():
 
                 # ===== Arduino WEIGHT handshake (pause motion until avg weight received) =====
                 if arduino_state.get("await_weight", False):
+                    # 如果 Arduino 明确回了错误（NOT_READY / WEIGHT_ERR），立刻解锁，避免无意义等待
+                    if arduino_state.get("weight_err", False) or arduino_state.get("last_arduino_msg", "") == "NOT_READY":
+                        print(f"[WEIGHT] Arduino replied error: {arduino_state.get('last_arduino_msg','')}. Unblocking pipeline.")
+                        arduino_state["await_weight"] = False
+                        arduino_state["weight_rdy"] = False
+                        arduino_state["weight_err"] = False
+
                     # 超时保护：避免 Arduino 没回导致系统永久卡死
                     if (now - arduino_state.get("weight_req_ts", now)) > 3.0:
                         print("[WEIGHT] TIMEOUT waiting for Arduino. Unblocking pipeline.")
@@ -927,7 +1076,7 @@ def main():
                     phase_str = "WEIGH:IDLE"
                 header = (
                     f"Beans:{beans_count} Rocks:{rocks_count} | mask:{mask_area} "
-                    f"| {w_str}/{t_str} {phase_str} | empty:{empty_streak}/{EMPTY_FRAMES} AUTO_FEED:{'ON' if AUTO_FEED_ENABLED else 'OFF'} "
+                    f"| {w_str}/{t_str} {phase_str} msg:{arduino_state.get('last_arduino_msg','-') or '-'} | empty:{empty_streak}/{EMPTY_FRAMES} AUTO_FEED:{'ON' if AUTO_FEED_ENABLED else 'OFF'} "
                     f"| decision:{decision or 'NONE'} streak:{decision_streak}/{FLIP_STABLE_FRAMES} AUTO_FLIP:{'ON' if AUTO_FLIP_ENABLED else 'OFF'} "
                     f"| gate:{max(0.0, cv_gate_until-now):.2f}s present:{present_streak}/{PRESENT_STABLE_FRAMES} "
                     f"| afterFeedWin:{'YES' if ((now-last_feed_time)<=DETECT_WINDOW_AFTER_FEED_SEC) else 'NO'} "
