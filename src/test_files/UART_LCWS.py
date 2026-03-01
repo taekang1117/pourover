@@ -1,62 +1,78 @@
 #!/usr/bin/env python3
-# weight_only.py
+# UART_LCWS_test.py
 import sys
 import time
 import re
+import argparse
+
 import serial  # pip install pyserial
 
-PORT = "/dev/ttyACM0"
-BAUD = 115200
-
-# 匹配：Weight: 8.61 g
+# 匹配 Arduino 输出：Weight: 8.61 g
 WEIGHT_RE = re.compile(r"Weight:\s*([-+]?\d*\.?\d+)\s*g", re.IGNORECASE)
 
 def main():
-    print(f"[INFO] Opening {PORT} @ {BAUD} ...")
-    ser = serial.Serial(PORT, baudrate=BAUD, timeout=0.2)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", default="/dev/ttyACM0", help="Serial port (default: /dev/ttyACM0)")
+    parser.add_argument("--baud", type=int, default=115200, help="Baud rate (default: 115200)")
+    parser.add_argument("--interval", type=float, default=1.0, help="Send 'r' every N seconds (default: 1.0)")
+    parser.add_argument("--newline", action="store_true", help="Print each weight on a new line")
+    parser.add_argument("--raw", action="store_true", help="Also print non-Weight lines (debug)")
+    args = parser.parse_args()
 
-    # 打开串口通常会让 Arduino reset，给它启动时间
+    print(f"[INFO] Opening {args.port} @ {args.baud} ...")
+    ser = serial.Serial(args.port, baudrate=args.baud, timeout=0.2)
+
+    # 打开串口通常会让 Arduino reset，给它一点启动时间
     time.sleep(2.0)
-
-    print(f"[OK] Opened serial: {PORT} @ {BAUD}")
-    print("[INFO] Sending 'r' to start weight output ...")
     try:
-        ser.write(b"r\n")  # 触发开始输出重量
-        ser.flush()
-    except Exception as e:
-        print(f"[WARN] Failed to send 'r': {e}")
+        ser.reset_input_buffer()
+    except Exception:
+        pass
 
-    newline_mode = ("--newline" in sys.argv)
+    print(f"[OK] Opened serial: {args.port} @ {args.baud}")
+    print(f"[INFO] Sending 'r' every {args.interval:.2f}s. (Ctrl+C to exit)")
 
-    last_any_line = time.time()
+    next_send = time.time()  # 立即发送一次
+    last_seen_any = time.time()
+
     try:
         while True:
-            raw = ser.readline()
-            if not raw:
-                # 1 秒没收到任何行，提示一下（方便你判断是否还在输出）
-                if time.time() - last_any_line > 1.0:
-                    sys.stdout.write("\r[WAIT] No serial lines yet...            ")
-                    sys.stdout.flush()
-                    last_any_line = time.time()
-                continue
+            now = time.time()
 
-            last_any_line = time.time()
-            s = raw.decode("utf-8", errors="ignore").strip()
+            # 1) 定时发送 'r'
+            if now >= next_send:
+                try:
+                    ser.write(b"r\n")
+                    ser.flush()
+                except Exception as e:
+                    print(f"\n[ERR] write failed: {e}")
+                    break
+                next_send = now + args.interval
 
-            m = WEIGHT_RE.search(s)
-            if not m:
-                # 只考虑 weight 输出：非 Weight 行全部忽略
-                continue
+            # 2) 读取 Arduino 输出
+            line = ser.readline()
+            if line:
+                last_seen_any = now
+                s = line.decode("utf-8", errors="ignore").strip()
 
-            w = float(m.group(1))
-
-            if newline_mode:
-                ts = time.strftime("%H:%M:%S")
-                print(f"{ts}  Weight: {w:.2f} g")
+                m = WEIGHT_RE.search(s)
+                if m:
+                    w = float(m.group(1))
+                    if args.newline:
+                        ts = time.strftime("%H:%M:%S")
+                        print(f"{ts}  Weight: {w:.2f} g")
+                    else:
+                        sys.stdout.write(f"\rWeight: {w:.2f} g    ")
+                        sys.stdout.flush()
+                else:
+                    if args.raw:
+                        print(s)
             else:
-                # 同一行刷新，更像实时仪表
-                sys.stdout.write(f"\rWeight: {w:.2f} g    ")
-                sys.stdout.flush()
+                # 连接测试：长时间没任何输出就提示一下
+                if now - last_seen_any > 2.0:
+                    sys.stdout.write("\r[WAIT] No serial output yet...           ")
+                    sys.stdout.flush()
+                    last_seen_any = now
 
     except KeyboardInterrupt:
         print("\n[EXIT] Bye.")
