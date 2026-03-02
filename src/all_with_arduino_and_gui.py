@@ -1568,7 +1568,7 @@ async def ws_handler(request):
     app: web.Application = request.app
     sorter: SorterApp = app["sorter"]
 
-    ws = web.WebSocketResponse(heartbeat=none)
+    ws = web.WebSocketResponse(heartbeat=None)
     await ws.prepare(request)
 
     app["ws_clients"].add(ws)
@@ -1625,7 +1625,7 @@ async def ws_video_handler(request):
     app: web.Application = request.app
     sorter: SorterApp = app["sorter"]
 
-    ws = web.WebSocketResponse(heartbeat=none)
+    ws = web.WebSocketResponse(heartbeat=None)
     await ws.prepare(request)
 
     period = 1.0 / max(1, int(VIDEO_FPS))
