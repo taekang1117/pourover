@@ -134,10 +134,7 @@ AUTO_ARM_ON_DONE = False  # if True: send 'a' when done
 # =========================
 HTTP_HOST = "0.0.0.0"
 HTTP_PORT = 8000
-VIDEO_FPS = 10
-CAPTURE_FPS = 15  # throttle camera capture to reduce load/overheat
-CAMERA_FAILS_BEFORE_RESTART = 3
-CAMERA_RESTART_COOLDOWN_S = 3.0  # send to browser
+VIDEO_FPS = 10  # send to browser
 JPEG_QUALITY = 75
 
 # =========================
@@ -661,10 +658,6 @@ class SorterApp:
         self.model_feature_cols = None
 
         self.picam2 = None
-        # camera robustness
-        self._cam_fail_count = 0
-        self._last_cam_restart_ts = 0.0
-        self._next_capture_ts = 0.0
         self.roi_rect = None
         self.bg_gray = None
 
@@ -892,60 +885,6 @@ class SorterApp:
         self.roi_rect = clamp_roi(ROI_X, ROI_Y, ROI_W, ROI_H, FRAME_W, FRAME_H)
         self._set_phase("idle")
 
-    def _restart_camera(self, reason: str):
-        """Attempt to restart the camera pipeline after disconnect/errors."""
-        now = time.time()
-        if (now - self._last_cam_restart_ts) < CAMERA_RESTART_COOLDOWN_S:
-            return
-        self._last_cam_restart_ts = now
-        print(f"[CAMERA] Restarting camera (reason={reason}) ...")
-        try:
-            if self.picam2 is not None:
-                try:
-                    self.picam2.stop()
-                except Exception:
-                    pass
-                try:
-                    # Picamera2 has close() on newer versions
-                    if hasattr(self.picam2, "close"):
-                        self.picam2.close()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-        # Re-init with LED on (exposure stability)
-        try:
-            set_max_white()
-            time.sleep(0.2)
-        except Exception:
-            pass
-
-        try:
-            self.picam2 = Picamera2()
-            config = self.picam2.create_preview_configuration(main={"format": "RGB888", "size": (FRAME_W, FRAME_H)})
-            self.picam2.configure(config)
-            self.picam2.start()
-            time.sleep(1.5)
-            try:
-                self.picam2.set_controls({"AeEnable": False, "AwbEnable": False})
-            except Exception:
-                pass
-            self._cam_fail_count = 0
-            self._next_capture_ts = time.time()
-            # Force re-capture background for consistency
-            self.bg_gray = None
-            if self._run_enabled:
-                self._set_phase("initializing")
-            else:
-                self._set_phase("idle")
-            # clear camera error banner if any
-            self._clear_error()
-            print("[CAMERA] Restart OK.")
-        except Exception as e:
-            self._set_error("CAMERA_RESTART_FAIL", str(e))
-            print(f"[CAMERA] Restart FAILED: {e}")
-
     def shutdown(self):
         self._stop_event.set()
         try:
@@ -997,25 +936,11 @@ class SorterApp:
                 if self.arduino_state.get("last_error"):
                     self.state.error = self.arduino_state["last_error"]
 
-
-            # capture (throttled) + auto-restart
-            now = time.time()
-            if self._next_capture_ts <= 0.0:
-                self._next_capture_ts = now
-            if now < self._next_capture_ts:
-                time.sleep(min(0.01, self._next_capture_ts - now))
-                continue
-            self._next_capture_ts = now + (1.0 / max(1, int(CAPTURE_FPS)))
-
+            # capture
             try:
                 frame_rgb = self.picam2.capture_array()
-                self._cam_fail_count = 0
             except Exception as e:
-                self._cam_fail_count += 1
                 self._set_error("CAMERA", str(e))
-                print(f"[CAMERA] capture error ({self._cam_fail_count}): {e}")
-                if self._cam_fail_count >= CAMERA_FAILS_BEFORE_RESTART:
-                    self._restart_camera(reason=str(e))
                 time.sleep(0.1)
                 continue
 
@@ -1489,13 +1414,44 @@ UI_HTML = """<!doctype html>
   }
 
   // JSON WS (state + commands + logs)
-  var ws = new WebSocket(wsUrl('/ws'));
-  wsStat.textContent = 'WS: connecting';
-  ws.onopen = function(){ wsStat.textContent='WS: connected'; addLog('[WS] connected'); };
-  ws.onclose = function(){ wsStat.textContent='WS: disconnected'; addLog('[WS] disconnected'); };
-  ws.onerror = function(){ wsStat.textContent='WS: error'; addLog('[WS] error'); };
+  var ws = null;
+  var wsReconnectMs = 1000;
 
-  ws.onmessage = function(ev){
+  function connectWS(){
+    try{
+      wsStat.textContent = 'WS: connecting';
+      ws = new WebSocket(wsUrl('/ws'));
+    }catch(e){
+      wsStat.textContent = 'WS: error';
+      addLog('[WS] connect exception (reconnecting...)');
+      setTimeout(connectWS, wsReconnectMs);
+      wsReconnectMs = Math.min(10000, wsReconnectMs * 2);
+      return;
+    }
+
+    ws.onopen = function(){
+      wsStat.textContent='WS: connected';
+      addLog('[WS] connected');
+      wsReconnectMs = 1000;
+    };
+    ws.onclose = function(){
+      wsStat.textContent='WS: disconnected';
+      addLog('[WS] disconnected (reconnecting...)');
+      setTimeout(connectWS, wsReconnectMs);
+      wsReconnectMs = Math.min(10000, wsReconnectMs * 2);
+    };
+    ws.onerror = function(){
+      wsStat.textContent='WS: error';
+      addLog('[WS] error');
+      // onclose will retry
+    };
+    ws.onmessage = handleWSMessage;
+  }
+
+  connectWS();
+
+
+  function handleWSMessage(ev){
     var msg;
     try{ msg = JSON.parse(ev.data); }catch(e){ return; }
     if(msg.type === 'state'){
@@ -1520,10 +1476,9 @@ UI_HTML = """<!doctype html>
     }else if(msg.type === 'error'){
       showError(msg.error);
     }
-  };
-
-  function sendCmd(cmd){
-    if(ws.readyState !== 1){
+  }
+function sendCmd(cmd){
+    if(!ws || ws.readyState !== 1){
       addLog('[WS] not connected; cannot send ' + cmd);
       return;
     }
@@ -1535,60 +1490,70 @@ UI_HTML = """<!doctype html>
   $('stopBtn').onclick  = function(){ sendCmd('stop');  };
   $('tareBtn').onclick  = function(){ sendCmd('tare');  };
 
-  // Video WS (binary JPEG) with auto-reconnect
+  // Video WS (binary JPEG)
   var wsv = null;
-  var img = new Image();
-  var drawing = false;
-
-  img.onload = function(){
-    try{ ctx.drawImage(img, 0, 0, canvas.width, canvas.height); }catch(e){}
-    drawing = false;
-  };
+  var wsvReconnectMs = 1000;
 
   function connectVideo(){
     try{
+      wsVStat.textContent = 'VIDEO: connecting';
       wsv = new WebSocket(wsUrl('/ws/video'));
       wsv.binaryType = 'arraybuffer';
-      wsVStat.textContent = 'VIDEO: connecting';
-
-      wsv.onopen = function(){
-        wsVStat.textContent='VIDEO: connected';
-        addLog('[WS-VIDEO] connected');
-      };
-      wsv.onclose = function(){
-        wsVStat.textContent='VIDEO: disconnected';
-        addLog('[WS-VIDEO] disconnected (reconnecting...)');
-        setTimeout(connectVideo, 1000);
-      };
-      wsv.onerror = function(){
-        wsVStat.textContent='VIDEO: error';
-        addLog('[WS-VIDEO] error');
-        try{ wsv.close(); }catch(e){}
-      };
-
-      wsv.onmessage = function(ev){
-        try{
-          if(drawing) return; // drop frames if decode is behind
-          drawing = true;
-          var blob = new Blob([ev.data], {type:'image/jpeg'});
-          var url = (window.URL || window.webkitURL).createObjectURL(blob);
-          img.src = url;
-          // revoke after load (best effort)
-          setTimeout(function(){
-            try{ (window.URL || window.webkitURL).revokeObjectURL(url); }catch(e){}
-          }, 2000);
-        }catch(e){
-          drawing = false;
-        }
-      };
     }catch(e){
-      wsVStat.textContent='VIDEO: error';
-      setTimeout(connectVideo, 1500);
+      wsVStat.textContent = 'VIDEO: error';
+      addLog('[WS-VIDEO] connect exception (reconnecting...)');
+      setTimeout(connectVideo, wsvReconnectMs);
+      wsvReconnectMs = Math.min(10000, wsvReconnectMs * 2);
+      return;
     }
+
+    wsv.onopen = function(){
+      wsVStat.textContent='VIDEO: connected';
+      addLog('[WS-VIDEO] connected');
+      wsvReconnectMs = 1000;
+    };
+    wsv.onclose = function(){
+      wsVStat.textContent='VIDEO: disconnected';
+      addLog('[WS-VIDEO] disconnected (reconnecting...)');
+      setTimeout(connectVideo, wsvReconnectMs);
+      wsvReconnectMs = Math.min(10000, wsvReconnectMs * 2);
+    };
+    wsv.onerror = function(){
+      wsVStat.textContent='VIDEO: error';
+      addLog('[WS-VIDEO] error');
+      // onclose will retry
+    };
+    wsv.onmessage = handleVideoMessage;
   }
 
   connectVideo();
 
+
+  // Fallback decode: Image + ObjectURL (more compatible than createImageBitmap)
+  var img = new Image();
+  var drawing = false;
+  img.onload = function(){
+    try{
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    }catch(e){}
+    drawing = false;
+  };
+
+  function handleVideoMessage(ev){
+    try{
+      if(drawing) return; // drop frames if decode is behind
+      drawing = true;
+      var blob = new Blob([ev.data], {type:'image/jpeg'});
+      var url = (window.URL || window.webkitURL).createObjectURL(blob);
+      img.src = url;
+      // revoke after load (best effort)
+      setTimeout(function(){
+        try{ (window.URL || window.webkitURL).revokeObjectURL(url); }catch(e){}
+      }, 5000);
+    }catch(e){
+      drawing = false;
+    }
+  }
 })();
 </script>
 </body>
@@ -1620,7 +1585,10 @@ async def ws_handler(request):
 
     async def state_loop():
         while not ws.closed:
-            await ws.send_str(json.dumps({"type": "state", "data": sorter.snapshot_state()}))
+            try:
+                await ws.send_str(json.dumps({"type": "state", "data": sorter.snapshot_state()}))
+            except Exception:
+                break
             await asyncio.sleep(0.1)
 
     state_task = asyncio.create_task(state_loop())
@@ -1665,11 +1633,11 @@ async def ws_video_handler(request):
         while not ws.closed:
             jpg = sorter.get_latest_jpeg()
             if jpg is not None:
-                try:
-                    await ws.send_bytes(jpg)
-                except Exception:
-                    break
-            await asyncio.sleep(period)
+            try:
+                await ws.send_bytes(jpg)
+            except Exception:
+                break
+await asyncio.sleep(period)
     finally:
         pass
 
