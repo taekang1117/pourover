@@ -1232,9 +1232,9 @@ class SorterApp:
                                 # increment sorted counters (basket count)
                                 with self._lock:
                                     if flip_label == "BEAN":
-                                        self.state.beans_sorted += beans_count
+                                        self.state.beans_sorted += 1
                                     else:
-                                        self.state.rocks_sorted += rocks_count
+                                        self.state.rocks_sorted += 1
 
                                 # trigger weigh
                                 if self.arduino_ser is not None:
@@ -1278,10 +1278,10 @@ class SorterApp:
 # Web server (aiohttp)
 # =========================
 UI_HTML = """<!doctype html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>LCWS + Sorting Dashboard</title>
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; background:#0b0f14; color:#e6edf3; }
@@ -1294,7 +1294,7 @@ UI_HTML = """<!doctype html>
     .big { font-size: 34px; font-weight: 700; }
     .label { opacity: .75; font-size: 12px; }
     .phase { font-weight: 700; }
-    .btns { display:flex; gap: 10px; }
+    .btns { display:flex; gap: 10px; flex-wrap: wrap; }
     button { padding: 10px 14px; border-radius: 10px; border: 1px solid #2b3b4f; background:#0f1720; color:#e6edf3; cursor:pointer; }
     button:hover { background:#132033; }
     #error { display:none; padding: 10px 12px; border-radius: 10px; border: 1px solid #7f1d1d; background:#2a0b0b; color:#fecaca; margin-bottom: 10px; }
@@ -1302,50 +1302,58 @@ UI_HTML = """<!doctype html>
     ul { margin: 8px 0 0 18px; padding:0; }
     li { margin: 4px 0; }
     .muted { opacity:.75 }
+    .statusline { display:flex; justify-content:space-between; gap:10px; font-size:12px; opacity:.85; margin-top:8px; }
+    .pill { border:1px solid #2b3b4f; padding:2px 8px; border-radius:999px; }
   </style>
 </head>
 <body>
-  <div class=\"wrap\">
-    <div class=\"card\" id=\"videoCard\">
-      <div id=\"error\"></div>
-      <canvas id=\"canvas\" width=\"960\" height=\"540\"></canvas>
-      <div class=\"muted\" style=\"margin-top:8px\">Video: Original frame with ROI + bounding boxes.</div>
+  <div class="wrap">
+    <div class="card" id="videoCard">
+      <div id="error"></div>
+      <canvas id="canvas" width="960" height="540"></canvas>
+      <div class="statusline muted">
+        <div>Video: Original frame with ROI + bounding boxes.</div>
+        <div>
+          <span class="pill" id="wsStat">WS: --</span>
+          <span class="pill" id="wsVStat">VIDEO: --</span>
+        </div>
+      </div>
     </div>
 
-    <div style=\"display:flex; flex-direction:column; gap:12px\">
-      <div class=\"row\">
-        <div class=\"card\">
-          <div class=\"label\">Current Weight (avg)</div>
-          <div class=\"big\" id=\"weight\">-- g</div>
-          <div class=\"muted\">Target: <span id=\"target\">--</span> g</div>
+    <div style="display:flex; flex-direction:column; gap:12px">
+      <div class="row">
+        <div class="card">
+          <div class="label">Current Weight (avg)</div>
+          <div class="big" id="weight">-- g</div>
+          <div class="muted">Target: <span id="target">--</span> g</div>
         </div>
-        <div class=\"card\">
-          <div class=\"label\">Beans in Basket</div>
-          <div class=\"big\" id=\"beans\">0</div>
-          <div class=\"muted\">Rocks: <span id=\"rocks\">0</span></div>
+        <div class="card">
+          <div class="label">Beans in Basket</div>
+          <div class="big" id="beans">0</div>
+          <div class="muted">Rocks: <span id="rocks">0</span></div>
         </div>
       </div>
 
-      <div class=\"card\">
-        <div class=\"label\">State</div>
-        <div class=\"big phase\" id=\"phase\">initializing</div>
-        <div class=\"muted\">Decision: <span id=\"decision\">NONE</span> · Arduino: <span id=\"ard\">--</span></div>
+      <div class="card">
+        <div class="label">State</div>
+        <div class="big phase" id="phase">initializing</div>
+        <div class="muted">Decision: <span id="decision">NONE</span> · Arduino: <span id="ard">--</span></div>
       </div>
 
-      <div class=\"card\">
-        <div class=\"label\">Controls</div>
-        <div class=\"btns\" style=\"margin-top:8px\">
-          <button id=\"startBtn\">Start</button>
-          <button id=\"stopBtn\">Stop</button>
-          <button id=\"tareBtn\">Tare</button>
+      <div class="card">
+        <div class="label">Controls</div>
+        <div class="btns" style="margin-top:8px">
+          <button id="startBtn">Start</button>
+          <button id="stopBtn">Stop</button>
+          <button id="tareBtn">Tare</button>
         </div>
-        <div class=\"muted\" style=\"margin-top:10px\">Hints</div>
-        <ul class=\"muted\" id=\"hints\"></ul>
+        <div class="muted" style="margin-top:10px">Hints</div>
+        <ul class="muted" id="hints"></ul>
       </div>
 
-      <div class=\"card\">
-        <div class=\"label\">Log</div>
-        <div id=\"log\"></div>
+      <div class="card">
+        <div class="label">Log</div>
+        <div id="log"></div>
       </div>
 
     </div>
@@ -1353,23 +1361,24 @@ UI_HTML = """<!doctype html>
 
 <script>
 (function(){
-  const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
-  const wsVidUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/video';
-
-  const $ = (id)=>document.getElementById(id);
-  const logEl = $('log');
-  const errEl = $('error');
-  const canvas = $('canvas');
-  const ctx = canvas.getContext('2d');
+  function $(id){ return document.getElementById(id); }
+  var logEl = $('log');
+  var errEl = $('error');
+  var canvas = $('canvas');
+  var ctx = canvas.getContext('2d');
+  var wsStat = $('wsStat');
+  var wsVStat = $('wsVStat');
 
   function addLog(line){
-    const maxLines = 500;
-    logEl.textContent += line + '\n';
-    const lines = logEl.textContent.split('\n');
-    if(lines.length > maxLines){
-      logEl.textContent = lines.slice(lines.length - maxLines).join('\n');
-    }
-    logEl.scrollTop = logEl.scrollHeight;
+    try{
+      var maxLines = 500;
+      logEl.textContent += line + '\\n';
+      var lines = logEl.textContent.split('\\n');
+      if(lines.length > maxLines){
+        logEl.textContent = lines.slice(lines.length - maxLines).join('\\n');
+      }
+      logEl.scrollTop = logEl.scrollHeight;
+    }catch(e){}
   }
 
   function showError(err){
@@ -1379,68 +1388,104 @@ UI_HTML = """<!doctype html>
       return;
     }
     errEl.style.display='block';
-    errEl.textContent = `[${err.code}] ${err.message}`;
+    errEl.textContent = '[' + (err.code || 'ERR') + '] ' + (err.message || '');
   }
 
   function setHints(hints){
-    const ul = $('hints');
+    var ul = $('hints');
     ul.innerHTML='';
-    (hints||[]).forEach(h=>{
-      const li=document.createElement('li');
-      li.textContent=h;
+    if(!hints) return;
+    for(var i=0;i<hints.length;i++){
+      var li=document.createElement('li');
+      li.textContent = hints[i];
       ul.appendChild(li);
-    });
+    }
   }
 
-  // JSON WS
-  const ws = new WebSocket(wsUrl);
-  ws.onopen = ()=>addLog('[WS] connected');
-  ws.onclose = ()=>addLog('[WS] disconnected');
-  ws.onmessage = (ev)=>{
-    let msg;
+  function wsUrl(path){
+    var proto = (location.protocol === 'https:') ? 'wss://' : 'ws://';
+    return proto + location.host + path;
+  }
+
+  // JSON WS (state + commands + logs)
+  var ws = new WebSocket(wsUrl('/ws'));
+  wsStat.textContent = 'WS: connecting';
+  ws.onopen = function(){ wsStat.textContent='WS: connected'; addLog('[WS] connected'); };
+  ws.onclose = function(){ wsStat.textContent='WS: disconnected'; addLog('[WS] disconnected'); };
+  ws.onerror = function(){ wsStat.textContent='WS: error'; addLog('[WS] error'); };
+
+  ws.onmessage = function(ev){
+    var msg;
     try{ msg = JSON.parse(ev.data); }catch(e){ return; }
-    if(msg.type==='state'){
-      $('phase').textContent = msg.data.phase;
-      $('target').textContent = (msg.data.target_g ?? '--');
-      $('beans').textContent = (msg.data.beans_sorted ?? 0);
-      $('rocks').textContent = (msg.data.rocks_sorted ?? 0);
-      $('decision').textContent = (msg.data.decision ?? 'NONE');
-      $('ard').textContent = (msg.data.arduino?.ready ? 'READY' : 'NOT_READY');
-      if(msg.data.weight_g != null){
-        $('weight').textContent = msg.data.weight_g.toFixed(2) + ' g';
+    if(msg.type === 'state'){
+      var d = msg.data || {};
+      $('phase').textContent = d.phase || 'initializing';
+      $('target').textContent = (typeof d.target_g === 'number') ? String(d.target_g) : '--';
+      $('beans').textContent = (typeof d.beans_sorted === 'number') ? String(d.beans_sorted) : '0';
+      $('rocks').textContent = (typeof d.rocks_sorted === 'number') ? String(d.rocks_sorted) : '0';
+      $('decision').textContent = d.decision || 'NONE';
+      var ard = d.arduino || {};
+      $('ard').textContent = ard.ready ? 'READY' : 'NOT_READY';
+      if(d.weight_g !== null && typeof d.weight_g === 'number'){
+        $('weight').textContent = d.weight_g.toFixed(2) + ' g';
       }else{
         $('weight').textContent = '-- g';
       }
-      showError(msg.data.error);
-    }else if(msg.type==='log'){
+      showError(d.error);
+    }else if(msg.type === 'log'){
       addLog(msg.line);
-    }else if(msg.type==='controls'){
+    }else if(msg.type === 'controls'){
       setHints(msg.hints);
-    }else if(msg.type==='error'){
+    }else if(msg.type === 'error'){
       showError(msg.error);
     }
   };
 
   function sendCmd(cmd){
-    ws.send(JSON.stringify({type:'cmd', cmd}));
+    if(ws.readyState !== 1){
+      addLog('[WS] not connected; cannot send ' + cmd);
+      return;
+    }
+    ws.send(JSON.stringify({type:'cmd', cmd: cmd}));
+    addLog('[CMD] ' + cmd);
   }
 
-  $('startBtn').onclick = ()=>sendCmd('start');
-  $('stopBtn').onclick = ()=>sendCmd('stop');
-  $('tareBtn').onclick = ()=>sendCmd('tare');
+  $('startBtn').onclick = function(){ sendCmd('start'); };
+  $('stopBtn').onclick  = function(){ sendCmd('stop');  };
+  $('tareBtn').onclick  = function(){ sendCmd('tare');  };
 
-  // Video WS
-  const wsv = new WebSocket(wsVidUrl);
+  // Video WS (binary JPEG)
+  var wsv = new WebSocket(wsUrl('/ws/video'));
   wsv.binaryType = 'arraybuffer';
-  wsv.onopen = ()=>addLog('[WS-VIDEO] connected');
-  wsv.onclose = ()=>addLog('[WS-VIDEO] disconnected');
-  wsv.onmessage = async (ev)=>{
+  wsVStat.textContent = 'VIDEO: connecting';
+  wsv.onopen = function(){ wsVStat.textContent='VIDEO: connected'; addLog('[WS-VIDEO] connected'); };
+  wsv.onclose = function(){ wsVStat.textContent='VIDEO: disconnected'; addLog('[WS-VIDEO] disconnected'); };
+  wsv.onerror = function(){ wsVStat.textContent='VIDEO: error'; addLog('[WS-VIDEO] error'); };
+
+  // Fallback decode: Image + ObjectURL (more compatible than createImageBitmap)
+  var img = new Image();
+  var drawing = false;
+  img.onload = function(){
     try{
-      const blob = new Blob([ev.data], {type:'image/jpeg'});
-      const bmp = await createImageBitmap(blob);
-      ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
-      bmp.close && bmp.close();
-    }catch(e){ /* ignore */ }
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    }catch(e){}
+    drawing = false;
+  };
+
+  wsv.onmessage = function(ev){
+    try{
+      if(drawing) return; // drop frames if decode is behind
+      drawing = true;
+      var blob = new Blob([ev.data], {type:'image/jpeg'});
+      var url = (window.URL || window.webkitURL).createObjectURL(blob);
+      img.src = url;
+      // revoke after load (best effort)
+      setTimeout(function(){
+        try{ (window.URL || window.webkitURL).revokeObjectURL(url); }catch(e){}
+      }, 5000);
+    }catch(e){
+      drawing = false;
+    }
   };
 
 })();
