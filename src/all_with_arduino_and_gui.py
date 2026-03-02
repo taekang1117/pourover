@@ -865,10 +865,17 @@ class SorterApp:
             print("[ARDUINO] Sent 'g' (start after Pi ready).")
 
         # camera
+        # IMPORTANT: turn on LEDs BEFORE starting the camera so auto-exposure can settle.
+        # Otherwise exposure may be locked with LEDs off, and the scene becomes overexposed once LEDs turn on.
+        set_max_white()
+        time.sleep(0.2)
+
         self.picam2 = Picamera2()
         config = self.picam2.create_preview_configuration(main={"format": "RGB888", "size": (FRAME_W, FRAME_H)})
         self.picam2.configure(config)
         self.picam2.start()
+
+        # Let AE/AWB settle briefly, then lock them for stable CV features
         time.sleep(1.5)
         try:
             self.picam2.set_controls({"AeEnable": False, "AwbEnable": False})
@@ -876,7 +883,6 @@ class SorterApp:
             pass
 
         self.roi_rect = clamp_roi(ROI_X, ROI_Y, ROI_W, ROI_H, FRAME_W, FRAME_H)
-        set_max_white()
         self._set_phase("idle")
 
     def shutdown(self):
