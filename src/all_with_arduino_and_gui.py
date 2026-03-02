@@ -1628,17 +1628,22 @@ async def ws_video_handler(request):
     ws = web.WebSocketResponse(heartbeat=0)
     await ws.prepare(request)
 
+    period = 1.0 / max(1, int(VIDEO_FPS))
+
     try:
-        period = 1.0 / max(1, int(VIDEO_FPS))
         while not ws.closed:
             jpg = sorter.get_latest_jpeg()
             if jpg is not None:
-            try:
-                await ws.send_bytes(jpg)
-            except Exception:
-                break
-await asyncio.sleep(period)
+                try:
+                    await ws.send_bytes(jpg)
+                except Exception:
+                    # client disconnected or send failed
+                    break
+
+            await asyncio.sleep(period)
+
     finally:
+        # aiohttp will close ws automatically; keep for symmetry
         pass
 
     return ws
