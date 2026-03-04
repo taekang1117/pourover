@@ -54,7 +54,7 @@ CLOSE_ITERS = 2
 
 MIN_AREA = 1000
 # MAX_AREA = 8000
-MAX_AREA = 1600
+MAX_AREA = 10000
 
 # File to save data
 DATA_FILE = "training_data.csv"
