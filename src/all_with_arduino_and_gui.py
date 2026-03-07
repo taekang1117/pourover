@@ -127,7 +127,7 @@ ARDUINO_WEIGHT_TARGET_G = 20.0
 # Weighing cycle is ~2s nominal (1s settle + 1s sampling); keep margin for load/serial jitter.
 WEIGH_TIMEOUT_S = 6.0
 ARDUINO_START_AFTER_PI_READY = True
-AUTO_ARM_ON_DONE = False  # if True: send 'a' when done
+AUTO_ARM_ON_DONE = True  # auto-send 'a' when target weight is reached
 
 # =========================
 # Web GUI server
@@ -790,6 +790,16 @@ class SorterApp:
         self._ensure_arduino_ready(timeout_s=1.0)
         send_arduino(self.arduino_ser, b"t\n")
 
+    def cmd_arm(self):
+        print("[GUI] Arm")
+        if self.arduino_ser is None:
+            self._set_error("NO_ARDUINO", "Arduino serial not available")
+            return
+        if not self._ensure_arduino_ready(timeout_s=1.0):
+            self._set_error("ARDUINO_NOT_READY", "Arduino not ready for robotic arm trigger")
+            return
+        send_arduino(self.arduino_ser, b"a\n")
+
     def cmd_capture_bg(self):
         print("[GUI] Capture background")
         self.bg_gray = None
@@ -1081,8 +1091,11 @@ class SorterApp:
                                 self._set_phase("done")
                                 if AUTO_ARM_ON_DONE and self.arduino_ser is not None:
                                     # ensure ready before arm trigger
-                                    self._ensure_arduino_ready(timeout_s=1.0)
-                                    send_arduino(self.arduino_ser, b"a\n")
+                                    if self._ensure_arduino_ready(timeout_s=1.0):
+                                        print("[ARM] Auto-triggering robotic arm with command 'a'.")
+                                        send_arduino(self.arduino_ser, b"a\n")
+                                    else:
+                                        self._set_error("ARDUINO_NOT_READY", "Target reached, but Arduino was not ready for arm trigger")
                             else:
                                 self._set_phase("running" if self._run_enabled else "idle")
                     elif now > self.await_deadline:
@@ -1352,6 +1365,7 @@ UI_HTML = """<!doctype html>
           <button id="startBtn">Start</button>
           <button id="stopBtn">Stop</button>
           <button id="tareBtn">Tare</button>
+          <button id="armBtn">Arm</button>
         </div>
         <div class="muted" style="margin-top:10px">Hints</div>
         <ul class="muted" id="hints"></ul>
@@ -1489,6 +1503,7 @@ function sendCmd(cmd){
   $('startBtn').onclick = function(){ sendCmd('start'); };
   $('stopBtn').onclick  = function(){ sendCmd('stop');  };
   $('tareBtn').onclick  = function(){ sendCmd('tare');  };
+  $('armBtn').onclick   = function(){ sendCmd('arm');   };
 
   // Video WS (binary JPEG)
   var wsv = null;
@@ -1577,7 +1592,8 @@ async def ws_handler(request):
     hints = [
         "Start: begin auto sorting", 
         "Stop: stop all actions", 
-        "Tare: tare the load cell (basket empty)",
+        "Tare: tare the load cell (basket empty)", 
+        "Arm: manually trigger the robotic arm once Arduino is ready",
         "State meanings: initializing / idle / running / weighting / done",
         "Video shows ROI + object boxes (BEAN/ROCK)",
     ]
@@ -1608,6 +1624,8 @@ async def ws_handler(request):
                         sorter.cmd_stop()
                     elif cmd == "tare":
                         sorter.cmd_tare()
+                    elif cmd == "arm":
+                        sorter.cmd_arm()
                     elif cmd == "capture_bg":
                         sorter.cmd_capture_bg()
                     else:
