@@ -1475,6 +1475,8 @@ UI_HTML = """<!doctype html>
   var wsVStat = $('wsVStat');
   var lastTargetValue = null;
   var pendingTargetValue = null;
+  var draftTargetValue = null;
+  var targetInputDirty = false;
 
   function addLog(line){
     try{
@@ -1569,8 +1571,9 @@ UI_HTML = """<!doctype html>
 
         var shownTarget = (pendingTargetValue !== null) ? pendingTargetValue : d.target_g;
         $('target').textContent = shownTarget.toFixed(2);
-        if(document.activeElement !== $('targetInput') && pendingTargetValue === null){
+        if(!targetInputDirty && pendingTargetValue === null){
           $('targetInput').value = d.target_g.toFixed(2);
+          draftTargetValue = null;
         }
       }else{
         $('target').textContent = '--';
@@ -1593,7 +1596,9 @@ UI_HTML = """<!doctype html>
       if(d.error && d.error.code){
         if(d.error.code === 'TARGET_TIMEOUT' || d.error.code === 'TARGET_REJECT' || d.error.code === 'TARGET_INVALID' || d.error.code === 'TARGET_LOCKED' || d.error.code === 'ARDUINO_NOT_READY' || d.error.code === 'TARGET_INVALID_ACK'){
           pendingTargetValue = null;
-          if(typeof lastTargetValue === 'number' && document.activeElement !== $('targetInput')){
+          draftTargetValue = null;
+          targetInputDirty = false;
+          if(typeof lastTargetValue === 'number'){
             $('targetInput').value = lastTargetValue.toFixed(2);
           }
         }
@@ -1619,13 +1624,15 @@ function sendCmd(cmd, extra){
   }
 
   function applyTargetChange(){
-    var raw = $('targetInput').value;
+    var raw = (draftTargetValue !== null) ? String(draftTargetValue) : $('targetInput').value;
     var v = Number(raw);
     if(!Number.isFinite(v) || v <= 0){
       addLog('[GUI] invalid target weight: ' + raw);
       return;
     }
     pendingTargetValue = v;
+    draftTargetValue = null;
+    targetInputDirty = false;
     $('target').textContent = v.toFixed(2);
     $('targetInput').value = v.toFixed(2);
     sendCmd('set_target', {target_g: v});
@@ -1635,7 +1642,32 @@ function sendCmd(cmd, extra){
   $('stopBtn').onclick  = function(){ sendCmd('stop');  };
   $('tareBtn').onclick  = function(){ sendCmd('tare');  };
   $('armBtn').onclick   = function(){ sendCmd('arm');   };
+  $('targetBtn').addEventListener('mousedown', function(ev){
+    ev.preventDefault();
+  });
   $('targetBtn').onclick = applyTargetChange;
+  $('targetInput').addEventListener('focus', function(){
+    targetInputDirty = true;
+  });
+  $('targetInput').addEventListener('input', function(){
+    targetInputDirty = true;
+    var raw = $('targetInput').value;
+    var v = Number(raw);
+    draftTargetValue = (Number.isFinite(v) && v > 0) ? v : null;
+  });
+  $('targetInput').addEventListener('change', function(){
+    var raw = $('targetInput').value;
+    var v = Number(raw);
+    draftTargetValue = (Number.isFinite(v) && v > 0) ? v : null;
+  });
+  $('targetInput').addEventListener('blur', function(){
+    if(pendingTargetValue === null && draftTargetValue === null){
+      targetInputDirty = false;
+      if(typeof lastTargetValue === 'number'){
+        $('targetInput').value = lastTargetValue.toFixed(2);
+      }
+    }
+  });
   $('targetInput').addEventListener('keydown', function(ev){
     if(ev.key === 'Enter'){
       applyTargetChange();
