@@ -123,7 +123,7 @@ CLEAR_NUDGE_WAIT_SEC = 0.15
 # =========================
 ARDUINO_SERIAL_PORT = "/dev/ttyACM0"
 ARDUINO_BAUD = 115200
-ARDUINO_WEIGHT_TARGET_G = 20.0
+ARDUINO_DEFAULT_TARGET_G = 20.0
 # Weighing cycle is ~2s nominal (1s settle + 1s sampling); keep margin for load/serial jitter.
 WEIGH_TIMEOUT_S = 6.0
 ARDUINO_START_AFTER_PI_READY = True
@@ -508,6 +508,35 @@ def poll_arduino_serial(ser, state: Dict[str, Any]):
                 print("[ARDUINO<<] READY")
                 continue
 
+            if s.startswith("TARGET_G,"):
+                try:
+                    target_g = float(s.split(",", 1)[1])
+                    state["arduino_target_g"] = target_g
+                    state["last_error"] = None
+                    print(f"[ARDUINO<<] TARGET_G={target_g:.2f}")
+                except Exception:
+                    pass
+                continue
+
+            if s.startswith("TARGET_OK,"):
+                try:
+                    target_g = float(s.split(",", 1)[1])
+                    state["arduino_target_g"] = target_g
+                    state["target_update_pending"] = None
+                    state["target_update_requested_at"] = 0.0
+                    state["last_error"] = None
+                    print(f"[ARDUINO<<] TARGET_OK={target_g:.2f}")
+                except Exception:
+                    state["last_error"] = {"code": "TARGET_INVALID_ACK", "message": "Arduino returned invalid target acknowledgement"}
+                continue
+
+            if s == "TARGET_REJECT":
+                state["target_update_pending"] = None
+                state["target_update_requested_at"] = 0.0
+                state["last_error"] = {"code": "TARGET_REJECT", "message": "Arduino rejected target-weight update"}
+                print("[ARDUINO<<] TARGET_REJECT")
+                continue
+
             if s == "NOT_READY":
                 # Arduino indicates handshake missing (or it rebooted)
                 state["arduino_ready"] = False
@@ -611,7 +640,8 @@ class AppState:
     phase: str = "initializing"  # initializing | idle | running | weighting | done
     error: Optional[Dict[str, str]] = None
     weight_g: Optional[float] = None
-    target_g: float = ARDUINO_WEIGHT_TARGET_G
+    target_g: float = ARDUINO_DEFAULT_TARGET_G
+    can_change_target: bool = True
     feed_allowed: bool = True
     beans_sorted: int = 0
     rocks_sorted: int = 0
@@ -651,6 +681,9 @@ class SorterApp:
             "last_error": None,
             "last_arduino_line": "",
             "last_g_sent_ts": 0.0,
+            "arduino_target_g": ARDUINO_DEFAULT_TARGET_G,
+            "target_update_pending": None,
+            "target_update_requested_at": 0.0,
         }
 
         # vision
@@ -714,11 +747,14 @@ class SorterApp:
     def snapshot_state(self) -> Dict[str, Any]:
         with self._lock:
             s = self.state
+            can_change_target = (not self._run_enabled) and (not self.await_weight) and (not bool(self.arduino_state.get("arm_running", False)))
+            s.can_change_target = can_change_target
             return {
                 "phase": s.phase,
                 "error": s.error,
                 "weight_g": s.weight_g,
                 "target_g": s.target_g,
+                "can_change_target": s.can_change_target,
                 "feed_allowed": s.feed_allowed,
                 "beans_sorted": s.beans_sorted,
                 "rocks_sorted": s.rocks_sorted,
@@ -804,6 +840,37 @@ class SorterApp:
         print("[GUI] Capture background")
         self.bg_gray = None
         self._set_phase("initializing")
+
+    def cmd_set_target(self, target_g: Any):
+        print(f"[GUI] Change target weight -> {target_g}")
+        self._clear_error()
+
+        try:
+            new_target = float(target_g)
+        except Exception:
+            self._set_error("TARGET_INVALID", "Target weight must be a number")
+            return
+
+        if (not np.isfinite(new_target)) or new_target <= 0.0:
+            self._set_error("TARGET_INVALID", "Target weight must be greater than 0")
+            return
+
+        if self._run_enabled or self.await_weight or bool(self.arduino_state.get("arm_running", False)):
+            self._set_error("TARGET_LOCKED", "Change Weight can only be used before Start")
+            return
+
+        if self.arduino_ser is None:
+            self._set_error("NO_ARDUINO", "Arduino serial not available")
+            return
+
+        if not self._ensure_arduino_ready(timeout_s=1.0):
+            self._set_error("ARDUINO_NOT_READY", "Arduino not ready for target-weight update")
+            return
+
+        self.arduino_state["target_update_pending"] = new_target
+        self.arduino_state["target_update_requested_at"] = time.time()
+        self.arduino_state["last_error"] = None
+        send_arduino(self.arduino_ser, f"w,{new_target:.2f}\n".encode("utf-8"))
 
     # ---- Arduino helpers ----
     def _ensure_arduino_handshake(self, force: bool = False):
@@ -941,10 +1008,18 @@ class SorterApp:
             # propagate Arduino state to UI
             with self._lock:
                 self.state.weight_g = self.arduino_state.get("last_weight_g")
+                self.state.target_g = float(self.arduino_state.get("arduino_target_g", self.state.target_g))
                 self.state.feed_allowed = bool(self.arduino_state.get("feeder_allowed_by_weight", True))
                 # surface Arduino-side error
                 if self.arduino_state.get("last_error"):
                     self.state.error = self.arduino_state["last_error"]
+
+            pending_target = self.arduino_state.get("target_update_pending")
+            pending_target_ts = float(self.arduino_state.get("target_update_requested_at", 0.0) or 0.0)
+            if pending_target is not None and pending_target_ts > 0.0 and (time.time() - pending_target_ts) > 2.0:
+                self.arduino_state["target_update_pending"] = None
+                self.arduino_state["target_update_requested_at"] = 0.0
+                self._set_error("TARGET_TIMEOUT", "Timed out waiting for Arduino target-weight update")
 
             # capture
             try:
@@ -1085,7 +1160,7 @@ class SorterApp:
                             self._set_error("WEIGHT_INCOMPLETE", "Weigh cycle completed without WEIGHT_AVG/FEED")
                             self._set_phase("running" if self._run_enabled else "idle")
                         else:
-                            if (w >= ARDUINO_WEIGHT_TARGET_G) or (not bool(feed_allowed)):
+                            if (w >= float(self.state.target_g)) or (not bool(feed_allowed)):
                                 print("[WEIGHT] Target reached (w=%s)." % (w,))
                                 self._run_enabled = False
                                 self._set_phase("done")
@@ -1316,6 +1391,8 @@ UI_HTML = """<!doctype html>
     .btns { display:flex; gap: 10px; flex-wrap: wrap; }
     button { padding: 10px 14px; border-radius: 10px; border: 1px solid #2b3b4f; background:#0f1720; color:#e6edf3; cursor:pointer; }
     button:hover { background:#132033; }
+    button:disabled, input:disabled { opacity: .55; cursor: not-allowed; }
+    input { padding: 10px 12px; border-radius: 10px; border:1px solid #2b3b4f; background:#0f1720; color:#e6edf3; }
     #error { display:none; padding: 10px 12px; border-radius: 10px; border: 1px solid #7f1d1d; background:#2a0b0b; color:#fecaca; margin-bottom: 10px; }
     #log { height: 240px; overflow:auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas; font-size: 12px; white-space: pre-wrap; background:#0a0f16; border-radius: 10px; border:1px solid #1f2a37; padding: 10px; }
     ul { margin: 8px 0 0 18px; padding:0; }
@@ -1367,6 +1444,14 @@ UI_HTML = """<!doctype html>
           <button id="tareBtn">Tare</button>
           <button id="armBtn">Arm</button>
         </div>
+
+        <div class="label" style="margin-top:14px">Change Weight</div>
+        <div class="row" style="margin-top:8px">
+          <input id="targetInput" type="number" min="0.01" step="0.01" placeholder="Enter target weight (g)" />
+          <button id="targetBtn">Apply</button>
+        </div>
+        <div class="muted" id="targetHint" style="margin-top:8px">Can only be used before Start.</div>
+
         <div class="muted" style="margin-top:10px">Hints</div>
         <ul class="muted" id="hints"></ul>
       </div>
@@ -1388,6 +1473,7 @@ UI_HTML = """<!doctype html>
   var ctx = canvas.getContext('2d');
   var wsStat = $('wsStat');
   var wsVStat = $('wsVStat');
+  var lastTargetValue = null;
 
   function addLog(line){
     try{
@@ -1471,7 +1557,15 @@ UI_HTML = """<!doctype html>
     if(msg.type === 'state'){
       var d = msg.data || {};
       $('phase').textContent = d.phase || 'initializing';
-      $('target').textContent = (typeof d.target_g === 'number') ? String(d.target_g) : '--';
+      if(typeof d.target_g === 'number'){
+        $('target').textContent = String(d.target_g);
+        if(document.activeElement !== $('targetInput')){
+          $('targetInput').value = d.target_g.toFixed(2);
+        }
+        lastTargetValue = d.target_g;
+      }else{
+        $('target').textContent = '--';
+      }
       $('beans').textContent = (typeof d.beans_sorted === 'number') ? String(d.beans_sorted) : '0';
       $('rocks').textContent = (typeof d.rocks_sorted === 'number') ? String(d.rocks_sorted) : '0';
       $('decision').textContent = d.decision || 'NONE';
@@ -1482,6 +1576,10 @@ UI_HTML = """<!doctype html>
       }else{
         $('weight').textContent = '-- g';
       }
+      var canChange = !!d.can_change_target;
+      $('targetInput').disabled = !canChange;
+      $('targetBtn').disabled = !canChange;
+      $('targetHint').textContent = canChange ? 'Can only be used before Start.' : 'Locked after Start. Stop the run before changing target weight.';
       showError(d.error);
     }else if(msg.type === 'log'){
       addLog(msg.line);
@@ -1491,19 +1589,36 @@ UI_HTML = """<!doctype html>
       showError(msg.error);
     }
   }
-function sendCmd(cmd){
+function sendCmd(cmd, extra){
     if(!ws || ws.readyState !== 1){
       addLog('[WS] not connected; cannot send ' + cmd);
       return;
     }
-    ws.send(JSON.stringify({type:'cmd', cmd: cmd}));
+    var payload = Object.assign({type:'cmd', cmd: cmd}, extra || {});
+    ws.send(JSON.stringify(payload));
     addLog('[CMD] ' + cmd);
+  }
+
+  function applyTargetChange(){
+    var raw = $('targetInput').value;
+    var v = Number(raw);
+    if(!Number.isFinite(v) || v <= 0){
+      addLog('[GUI] invalid target weight: ' + raw);
+      return;
+    }
+    sendCmd('set_target', {target_g: v});
   }
 
   $('startBtn').onclick = function(){ sendCmd('start'); };
   $('stopBtn').onclick  = function(){ sendCmd('stop');  };
   $('tareBtn').onclick  = function(){ sendCmd('tare');  };
   $('armBtn').onclick   = function(){ sendCmd('arm');   };
+  $('targetBtn').onclick = applyTargetChange;
+  $('targetInput').addEventListener('keydown', function(ev){
+    if(ev.key === 'Enter'){
+      applyTargetChange();
+    }
+  });
 
   // Video WS (binary JPEG)
   var wsv = null;
@@ -1594,6 +1709,7 @@ async def ws_handler(request):
         "Stop: stop all actions", 
         "Tare: tare the load cell (basket empty)", 
         "Arm: manually trigger the robotic arm once Arduino is ready",
+        "Change Weight: updates GUI, Pi, and Arduino target weight before Start",
         "State meanings: initializing / idle / running / weighting / done",
         "Video shows ROI + object boxes (BEAN/ROCK)",
     ]
@@ -1628,6 +1744,8 @@ async def ws_handler(request):
                         sorter.cmd_arm()
                     elif cmd == "capture_bg":
                         sorter.cmd_capture_bg()
+                    elif cmd == "set_target":
+                        sorter.cmd_set_target(payload.get("target_g"))
                     else:
                         pass
             elif msg.type == web.WSMsgType.ERROR:
