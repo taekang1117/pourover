@@ -1474,6 +1474,7 @@ UI_HTML = """<!doctype html>
   var wsStat = $('wsStat');
   var wsVStat = $('wsVStat');
   var lastTargetValue = null;
+  var pendingTargetValue = null;
 
   function addLog(line){
     try{
@@ -1558,11 +1559,19 @@ UI_HTML = """<!doctype html>
       var d = msg.data || {};
       $('phase').textContent = d.phase || 'initializing';
       if(typeof d.target_g === 'number'){
-        $('target').textContent = String(d.target_g);
-        if(document.activeElement !== $('targetInput')){
+        lastTargetValue = d.target_g;
+
+        if(pendingTargetValue !== null){
+          if(Math.abs(d.target_g - pendingTargetValue) < 0.005){
+            pendingTargetValue = null;
+          }
+        }
+
+        var shownTarget = (pendingTargetValue !== null) ? pendingTargetValue : d.target_g;
+        $('target').textContent = shownTarget.toFixed(2);
+        if(document.activeElement !== $('targetInput') && pendingTargetValue === null){
           $('targetInput').value = d.target_g.toFixed(2);
         }
-        lastTargetValue = d.target_g;
       }else{
         $('target').textContent = '--';
       }
@@ -1580,6 +1589,16 @@ UI_HTML = """<!doctype html>
       $('targetInput').disabled = !canChange;
       $('targetBtn').disabled = !canChange;
       $('targetHint').textContent = canChange ? 'Can only be used before Start.' : 'Locked after Start. Stop the run before changing target weight.';
+
+      if(d.error && d.error.code){
+        if(d.error.code === 'TARGET_TIMEOUT' || d.error.code === 'TARGET_REJECT' || d.error.code === 'TARGET_INVALID' || d.error.code === 'TARGET_LOCKED' || d.error.code === 'ARDUINO_NOT_READY' || d.error.code === 'TARGET_INVALID_ACK'){
+          pendingTargetValue = null;
+          if(typeof lastTargetValue === 'number' && document.activeElement !== $('targetInput')){
+            $('targetInput').value = lastTargetValue.toFixed(2);
+          }
+        }
+      }
+
       showError(d.error);
     }else if(msg.type === 'log'){
       addLog(msg.line);
@@ -1606,6 +1625,9 @@ function sendCmd(cmd, extra){
       addLog('[GUI] invalid target weight: ' + raw);
       return;
     }
+    pendingTargetValue = v;
+    $('target').textContent = v.toFixed(2);
+    $('targetInput').value = v.toFixed(2);
     sendCmd('set_target', {target_g: v});
   }
 
